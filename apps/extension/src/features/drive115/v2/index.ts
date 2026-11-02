@@ -1776,6 +1776,59 @@ class Drive115V2Service {
     });
   }
 
+  async uploadRemoteImage(params: {
+    accessToken: string;
+    parentId: string | number;
+    fileName: string;
+    sourceUrl: string;
+  }): Promise<{ success: boolean; message?: string; fileId?: string; fileName?: string }> {
+    const token = String(params.accessToken || '').trim();
+    const sourceUrl = String(params.sourceUrl || '').trim();
+    const fileName = String(params.fileName || '').trim();
+    if (!token || !sourceUrl || !fileName) {
+      return { success: false, message: '缺少图片上传参数' };
+    }
+    if (typeof chrome === 'undefined' || !chrome.runtime?.id || typeof chrome.runtime.sendMessage !== 'function') {
+      return { success: false, message: '图片上传需要后台服务工作线程' };
+    }
+    const baseUrl = await this.getBaseURL();
+    try {
+      const response: any = await new Promise((resolve) => {
+        try {
+          chrome.runtime.sendMessage(
+            {
+              type: 'drive115.upload_remote_image_v2',
+              payload: {
+                accessToken: token,
+                parentId: String(params.parentId ?? '0'),
+                fileName,
+                sourceUrl,
+                baseUrl,
+              },
+            },
+            (result) => {
+              const error = chrome.runtime?.lastError;
+              resolve(error ? undefined : result);
+            },
+          );
+        } catch {
+          resolve(undefined);
+        }
+      });
+      if (!response || typeof response.success !== 'boolean') {
+        return { success: false, message: '后台图片上传服务未响应' };
+      }
+      return {
+        success: Boolean(response.success),
+        message: response.message,
+        fileId: response.fileId,
+        fileName: response.fileName || fileName,
+      };
+    } catch (error: any) {
+      return { success: false, message: friendlyRequestError(error) || error?.message || '115 图片上传失败' };
+    }
+  }
+
   async ensureFolder(params: {
     accessToken: string;
     parentId?: string | number;
