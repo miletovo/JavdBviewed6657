@@ -32,6 +32,7 @@ type OfflineOrganizerJob = {
   magnetName: string;
   coverUrl?: string;
   previewUrls: string[];
+  autoCleanupAfter115Download?: boolean;
   beforeFileIds: string[];
   beforeRootFileNames: string[];
   createdAt: number;
@@ -119,6 +120,7 @@ export async function scheduleDrive115OfflineOrganizerJob(
     magnetName: string;
     coverUrl?: string;
     previewUrls?: string[];
+    autoCleanupAfter115Download?: boolean;
     beforeFileIds: string[];
     beforeRootFileNames: string[];
     autoMarkWatched?: boolean;
@@ -156,6 +158,7 @@ export async function scheduleDrive115OfflineOrganizerJob(
     magnetName: String(input.magnetName || '').trim(),
     coverUrl: String(input.coverUrl || '').trim() || undefined,
     previewUrls: Array.from(new Set((input.previewUrls || []).map((url) => String(url || '').trim()).filter(Boolean))).slice(0, 8),
+    autoCleanupAfter115Download: input.autoCleanupAfter115Download === true,
     beforeFileIds: Array.from(new Set((input.beforeFileIds || []).map(String).filter(Boolean))),
     beforeRootFileNames: Array.from(new Set((input.beforeRootFileNames || []).map(String).filter(Boolean))),
     createdAt: now,
@@ -189,6 +192,7 @@ export function handleDrive115OfflineOrganizerMessage(
         magnetName: String(payload.magnetName || ''),
         coverUrl: String(payload.coverUrl || ''),
         previewUrls: Array.isArray(payload.previewUrls) ? payload.previewUrls.map(String) : [],
+        autoCleanupAfter115Download: payload.autoCleanupAfter115Download === true,
         beforeFileIds: Array.isArray(payload.beforeFileIds) ? payload.beforeFileIds.map(String) : [],
         beforeRootFileNames: Array.isArray(payload.beforeRootFileNames) ? payload.beforeRootFileNames.map(String) : [],
         autoMarkWatched: Boolean(payload.autoMarkWatched),
@@ -376,9 +380,12 @@ async function organizeCompletedJob(
   }
 
   // 仅删除本次新增且明确属于 torrent/系统杂项的文件；NFO、字幕、图片和说明文件保留。
-  const junkFiles = collected.filter((file) => (
-    !isDrive115VideoFileName(file.name) && isDrive115TaskJunkFileName(file.name)
-  ));
+  // 清理是用户显式开启的可选项；默认只整理视频和上传图片，不删除任何临时文件。
+  const junkFiles = job.autoCleanupAfter115Download === true
+    ? collected.filter((file) => (
+      !isDrive115VideoFileName(file.name) && isDrive115TaskJunkFileName(file.name)
+    ))
+    : [];
   let deleted = 0;
   for (let index = 0; index < junkFiles.length; index += 50) {
     const batch = junkFiles.slice(index, index + 50);
