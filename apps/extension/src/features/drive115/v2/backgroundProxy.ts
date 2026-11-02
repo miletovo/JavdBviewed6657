@@ -32,6 +32,148 @@ function nativeFetch(input: any, init?: any): Promise<Response> {
   return Function.prototype.apply.call(target, globalThis, init === undefined ? [input] : [input, init]);
 }
 
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes).map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + 0x8000, bytes.length)));
+  }
+  return btoa(binary);
+}
+
+function utf8ToBase64(value: string): string {
+  return bytesToBase64(new TextEncoder().encode(value));
+}
+
+async function sha1Hex(bytes: Uint8Array): Promise<string> {
+  const source = bytes.slice().buffer as ArrayBuffer;
+  const digest = await crypto.subtle.digest('SHA-1', source);
+  return bytesToHex(new Uint8Array(digest)).toUpperCase();
+}
+
+async function hmacSha1Base64(secret: string, value: string): Promise<string> {
+  const keyBytes = new TextEncoder().encode(secret).buffer as ArrayBuffer;
+  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']);
+  const message = new TextEncoder().encode(value).buffer as ArrayBuffer;
+  const signature = await crypto.subtle.sign('HMAC', key, message);
+  return bytesToBase64(new Uint8Array(signature));
+}
+
+async function uploadRemoteImageTo115(payload: any): Promise<{ success: boolean; message?: string; fileId?: string; fileName?: string }> {
+  const accessToken = String(payload.accessToken || '').trim();
+  const sourceUrl = String(payload.sourceUrl || '').trim();
+  const parentId = String(payload.parentId ?? '0').trim() || '0';
+  const fileName = String(payload.fileName || '').replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 200);
+  const base = String(payload.baseUrl || 'https://proapi.115.com').replace(/\/+$/, '');
+  if (!accessToken || !sourceUrl || !fileName) return { success: false, message: '缺少图片上传参数' };
+  let parsedSource: URL;
+  try { parsedSource = new URL(sourceUrl); } catch { return { success: false, message: '图片地址无效' }; }
+  if (parsedSource.protocol !== 'https:' && parsedSource.protocol !== 'http:') return { success: false, message: '仅允许 HTTP/HTTPS 图片地址' };
+
+  try {
+    const imageResponse = await nativeFetch(parsedSource.toString(), { method: 'GET', headers: { Accept: 'image/*' } });
+    if (!imageResponse.ok) return { success: false, message: '下载图片失败 (' + imageResponse.status + ')' };
+    const contentType = String(imageResponse.headers.get('content-type') || 'image/jpeg').split(';')[0].trim().toLowerCase();
+    if (!contentType.startsWith('image/')) return { success: false, message: '资源不是图片文件' };
+    const buffer = await imageResponse.arrayBuffer();
+    if (!buffer.byteLength || buffer.byteLength > 10 * 1024 * 1024) return { success: false, message: '图片为空或超过 10 MB 限制' };
+    const bytes = new Uint8Array(buffer);
+    const fileId = await sha1Hex(bytes);
+    const preId = await sha1Hex(bytes.subarray(0, Math.min(bytes.length, 128 * 1024)));
+
+    const postInit = async (signKey?: string, signVal?: string): Promise<any> => {
+      const form = new FormData();
+      form.set('file_name', fileName);
+      form.set('file_size', String(bytes.byteLength));
+      form.set('target', 'U_1_' + parentId);
+      form.set('fileid', fileId);
+      form.set('preid', preId);
+      if (signKey) form.set('sign_key', signKey);
+      if (signVal) form.set('sign_val', signVal);
+      const response = await nativeFetch(base + '/open/upload/init', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + accessToken, Accept: 'application/json' },
+        body: form,
+      });
+      const raw: any = await response.json().catch(() => ({}));
+      if (!response.ok || raw.state === false) throw new Error(raw.message || raw.error || '115 上传初始化失败 (' + response.status + ')');
+      return raw.data || raw;
+    };
+
+    let init = await postInit();
+    let status = Number(init.status || 0);
+    if (status === 2) return { success: true, fileId: String(init.file_id || ''), fileName };
+    if ([6, 7, 8].includes(status)) {
+      const parts = String(init.sign_check || '').split('-').map((value: string) => Number(value));
+      const start = parts[0];
+      const end = parts[1];
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end >= bytes.length) {
+        return { success: false, message: '115 上传二次校验范围无效' };
+      }
+      const signVal = await sha1Hex(bytes.subarray(start, end + 1));
+      init = await postInit(String(init.sign_key || ''), signVal);
+      status = Number(init.status || 0);
+      if (status === 2) return { success: true, fileId: String(init.file_id || ''), fileName };
+    }
+
+    const tokenResponse = await nativeFetch(base + '/open/upload/get_token', {
+      method: 'GET',
+      headers: { Authorization: 'Bearer ' + accessToken, Accept: 'application/json' },
+    });
+    const tokenRaw: any = await tokenResponse.json().catch(() => ({}));
+    if (!tokenResponse.ok || tokenRaw.state === false) throw new Error(tokenRaw.message || tokenRaw.error || '获取 115 上传凭据失败');
+    const uploadToken = Array.isArray(tokenRaw.data) ? tokenRaw.data[0] : (tokenRaw.data || tokenRaw);
+    const endpointValue = String(uploadToken.endpoint || '').trim();
+    const bucket = String(init.bucket || '').trim();
+    const object = String(init.object || '').replace(/^\/+/, '');
+    const secret = String(uploadToken.AccessKeySecret || uploadToken.AccessKeySecrett || '').trim();
+    const accessKeyId = String(uploadToken.AccessKeyId || '').trim();
+    const securityToken = String(uploadToken.SecurityToken || '').trim();
+    if (!endpointValue || !bucket || !object || !secret || !accessKeyId || !securityToken) {
+      return { success: false, message: '115 上传凭据或初始化结果不完整' };
+    }
+    const callbackValue = Array.isArray(init.callback) ? init.callback[0] : init.callback;
+    const callback = String(callbackValue?.callback || '').trim();
+    const callbackVar = String(callbackValue?.callback_var || '').trim();
+    if (!callback) return { success: false, message: '115 上传初始化未返回 callback' };
+    const endpoint = new URL(endpointValue.includes('://') ? endpointValue : 'https://' + endpointValue);
+    const host = endpoint.host.startsWith(bucket + '.') ? endpoint.host : bucket + '.' + endpoint.host;
+    const encodedObject = object.split('/').map((part: string) => encodeURIComponent(part)).join('/');
+    const uploadUrl = endpoint.protocol + '//' + host + '/' + encodedObject;
+    const callbackHeader = utf8ToBase64(callback);
+    const callbackVarHeader = callbackVar ? utf8ToBase64(callbackVar) : '';
+    const ossDate = new Date().toUTCString();
+    const canonicalHeaders = [
+      'x-oss-callback:' + callbackHeader + '\n',
+      ...(callbackVarHeader ? ['x-oss-callback-var:' + callbackVarHeader + '\n'] : []),
+      'x-oss-date:' + ossDate + '\n',
+      'x-oss-security-token:' + securityToken + '\n',
+    ].join('');
+    const canonicalResource = '/' + bucket + '/' + encodedObject;
+    const stringToSign = 'PUT\n\n' + contentType + '\n\n' + canonicalHeaders + canonicalResource;
+    const signature = await hmacSha1Base64(secret, stringToSign);
+    const headers: Record<string, string> = {
+      Authorization: 'OSS ' + accessKeyId + ':' + signature,
+      'Content-Type': contentType,
+      'x-oss-security-token': securityToken,
+      'x-oss-date': ossDate,
+      'x-oss-callback': callbackHeader,
+    };
+    if (callbackVarHeader) headers['x-oss-callback-var'] = callbackVarHeader;
+    const uploadResponse = await nativeFetch(uploadUrl, { method: 'PUT', headers, body: bytes });
+    if (!uploadResponse.ok) {
+      const detail = await uploadResponse.text().catch(() => '');
+      return { success: false, message: '上传图片到 115 OSS 失败 (' + uploadResponse.status + '): ' + detail.slice(0, 180) };
+    }
+    return { success: true, fileId: String(init.file_id || ''), fileName };
+  } catch (error: any) {
+    return { success: false, message: friendlyRequestError(error, error?.message || '115 图片上传失败') };
+  }
+}
+
 /**
  * 将底层平台错误翻译成可读文案，避免把
  * "Failed to execute 'fetch' on 'WorkerGlobalScope': Illegal invocation"
@@ -312,6 +454,12 @@ export function installDrive115V2Proxy(): void {
             sendResponse({ success: false, message: e?.message || '后台配额异常' });
             return false;
           }
+        } else if (message.type === 'drive115.upload_remote_image_v2') {
+          const payload = message?.payload || {};
+          void uploadRemoteImageTo115(payload)
+            .then((result) => sendResponse(result))
+            .catch((error) => sendResponse({ success: false, message: friendlyRequestError(error, '115 图片上传失败') }));
+          return true;
         } else if (message.type === 'drive115.manage_files_v2') {
           try {
             const payload = message?.payload || {};
