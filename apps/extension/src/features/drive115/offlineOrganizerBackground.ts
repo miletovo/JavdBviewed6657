@@ -4,8 +4,9 @@
  * @module features/drive115
  */
 import { STORAGE_KEYS } from '../../utils/config';
-import { getValue, setValue } from '../../utils/storage';
+import { getSettings, getValue, setValue } from '../../utils/storage';
 import { getDrive115V2Service } from './v2';
+import { uploadRemoteImageTo115 } from './v2/backgroundProxy';
 import {
   buildDrive115OrganizedVideoNames,
   findDrive115OfflineTask,
@@ -28,6 +29,8 @@ type OfflineOrganizerJob = {
   folderId: string;
   taskHash?: string;
   magnetName: string;
+  coverUrl?: string;
+  previewUrls: string[];
   beforeFileIds: string[];
   beforeRootFileNames: string[];
   createdAt: number;
@@ -40,6 +43,8 @@ type OfflineOrganizerJob = {
   lastError?: string;
   result?: {
     videoCount: number;
+    imagesUploaded: number;
+    imageFailures: number;
     moved: number;
     renamed: number;
     deleted: number;
@@ -109,6 +114,8 @@ export async function scheduleDrive115OfflineOrganizerJob(
     folderId: string;
     taskHash?: string;
     magnetName: string;
+    coverUrl?: string;
+    previewUrls?: string[];
     beforeFileIds: string[];
     beforeRootFileNames: string[];
     autoMarkWatched?: boolean;
@@ -144,6 +151,8 @@ export async function scheduleDrive115OfflineOrganizerJob(
     folderId,
     taskHash: taskHash || undefined,
     magnetName: String(input.magnetName || '').trim(),
+    coverUrl: String(input.coverUrl || '').trim() || undefined,
+    previewUrls: Array.from(new Set((input.previewUrls || []).map((url) => String(url || '').trim()).filter(Boolean))).slice(0, 8),
     beforeFileIds: Array.from(new Set((input.beforeFileIds || []).map(String).filter(Boolean))),
     beforeRootFileNames: Array.from(new Set((input.beforeRootFileNames || []).map(String).filter(Boolean))),
     createdAt: now,
@@ -175,6 +184,8 @@ export function handleDrive115OfflineOrganizerMessage(
         folderId: String(payload.folderId || ''),
         taskHash: String(payload.taskHash || ''),
         magnetName: String(payload.magnetName || ''),
+        coverUrl: String(payload.coverUrl || ''),
+        previewUrls: Array.isArray(payload.previewUrls) ? payload.previewUrls.map(String) : [],
         beforeFileIds: Array.isArray(payload.beforeFileIds) ? payload.beforeFileIds.map(String) : [],
         beforeRootFileNames: Array.isArray(payload.beforeRootFileNames) ? payload.beforeRootFileNames.map(String) : [],
         autoMarkWatched: Boolean(payload.autoMarkWatched),
@@ -250,6 +261,54 @@ async function collectNewFiles(
   return collected;
 }
 
+function imageExtensionFromUrl(sourceUrl: string): string {
+  try {
+    const ext = new URL(sourceUrl).pathname.match(/\\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+    if (ext === 'jpeg') return 'jpg';
+    if (ext && ['jpg', 'png', 'webp', 'gif'].includes(ext)) return ext;
+  } catch {}
+  return 'jpg';
+}
+
+async function uploadJavDbImagesTo115(
+  job: OfflineOrganizerJob,
+  accessToken: string,
+): Promise<{ imagesUploaded: number; imageFailures: number }> {
+  const assets: Array<{ sourceUrl: string; fileName: string }> = [];
+  if (job.coverUrl) {
+    assets.push({ sourceUrl: job.coverUrl, fileName: 'cover.' + imageExtensionFromUrl(job.coverUrl) });
+  }
+  job.previewUrls.slice(0, 8).forEach((sourceUrl, index) => {
+    assets.push({
+      sourceUrl,
+      fileName: 'preview-' + String(index + 1).padStart(2, '0') + '.' + imageExtensionFromUrl(sourceUrl),
+    });
+  });
+  if (!assets.length) return { imagesUploaded: 0, imageFailures: 0 };
+
+  const settings = await getSettings();
+  const baseUrl = String((settings as any)?.drive115?.v2ApiBaseUrl || 'https://proapi.115.com').replace(/\\/+$/, '');
+  let imagesUploaded = 0;
+  let imageFailures = 0;
+  for (const asset of assets) {
+    let result: { success: boolean; message?: string } = { success: false };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      result = await uploadRemoteImageTo115({
+        accessToken,
+        parentId: job.folderId,
+        fileName: asset.fileName,
+        sourceUrl: asset.sourceUrl,
+        baseUrl,
+      });
+      if (result.success) break;
+      if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+    if (result.success) imagesUploaded += 1;
+    else imageFailures += 1;
+  }
+  return { imagesUploaded, imageFailures };
+}
+
 async function organizeCompletedJob(
   job: OfflineOrganizerJob,
   accessToken: string,
@@ -263,7 +322,7 @@ async function organizeCompletedJob(
   );
   const videos = collected.filter((file) => isDrive115VideoFileName(file.name));
   if (!videos.length) {
-    return { videoCount: 0, moved: 0, renamed: 0, deleted: 0, failedOperations: 0 };
+    return { videoCount: 0, imagesUploaded: 0, imageFailures: 0, moved: 0, renamed: 0, deleted: 0, failedOperations: 0 };
   }
 
   const arranged = buildDrive115OrganizedVideoNames(
@@ -307,8 +366,11 @@ async function organizeCompletedJob(
     else failedOperations += batch.length;
   }
 
+  const imageResult = await uploadJavDbImagesTo115(job, accessToken);
   return {
     videoCount: videos.length,
+    imagesUploaded: imageResult.imagesUploaded,
+    imageFailures: imageResult.imageFailures,
     moved,
     renamed,
     deleted,
@@ -395,9 +457,9 @@ export async function handleDrive115OfflineOrganizerAlarm(alarmName: string): Pr
 
       try {
         job.result = await organizeCompletedJob(job, token.accessToken);
-        job.status = job.result.failedOperations ? 'partial' : 'completed';
-        job.lastError = job.result.failedOperations
-          ? '部分移动、重命名或清理操作未成功，请检查 115 文件夹'
+        job.status = (job.result.failedOperations || job.result.imageFailures) ? 'partial' : 'completed';
+        job.lastError = job.result.failedOperations || job.result.imageFailures
+          ? '部分移动、重命名、清理或图片上传操作未成功，请检查 115 文件夹'
           : undefined;
       } catch (error) {
         job.lastError = error instanceof Error ? error.message : String(error);
