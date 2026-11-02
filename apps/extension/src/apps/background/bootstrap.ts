@@ -14,6 +14,7 @@ if (typeof self === 'undefined' || !(self as any).registration) {
 }
 
 import { installDrive115V2Proxy } from '../../features/drive115/v2/backgroundProxy';
+import { handleDrive115OfflineOrganizerMessage } from '../../features/drive115/offlineOrganizerBackground';
 import { ensureMigrationsStart } from '../../platform/storage/migrations';
 import { registerMiscRouter } from './miscMessageRouter';
 import { registerWebDAVRouter } from '../../features/webdavSync/background/controller';
@@ -88,6 +89,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (handleDrive115OfflineOrganizerMessage(message, sender, sendResponse)) {
+    return true;
+  }
   if (handleTelemetryRuntimeMessage(message, sendResponse)) {
     return true;
   }
