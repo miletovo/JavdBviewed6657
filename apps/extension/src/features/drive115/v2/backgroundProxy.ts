@@ -292,6 +292,39 @@ export function installDrive115V2Proxy(): void {
               sendResponse({ success: false, message: friendlyRequestError(err, '后台请求失败') });
             });
           return true; // 异步响应
+        } else if (message.type === 'drive115.get_task_list_v2') {
+          try {
+            const accessToken = String(message?.payload?.accessToken || '').trim();
+            const page = Math.max(1, Math.floor(Number(message?.payload?.page) || 1));
+            const base = String(message?.payload?.baseUrl || 'https://proapi.115.com').replace(/\\/+$/, '');
+            if (!accessToken) {
+              sendResponse({ success: false, message: '缺少 accessToken' });
+              return false;
+            }
+            nativeFetch(`${base}/open/offline/get_task_list?page=${page}`, {
+              method: 'GET',
+              headers: {
+                Authorization: 'Bearer ' + accessToken,
+                Accept: 'application/json',
+              },
+            })
+              .then(async (res) => {
+                const raw = await res.json().catch(() => ({} as any));
+                const ok = (typeof raw.state === 'boolean' ? raw.state : res.ok) && res.ok;
+                sendResponse({
+                  success: ok,
+                  message: raw?.message || raw?.error || (ok ? undefined : '读取 115 离线任务失败 (' + res.status + ')'),
+                  raw,
+                });
+              })
+              .catch((error) => {
+                sendResponse({ success: false, message: friendlyRequestError(error, '后台读取 115 离线任务失败') });
+              });
+            return true;
+          } catch (error: any) {
+            sendResponse({ success: false, message: error?.message || '后台读取 115 离线任务异常' });
+            return false;
+          }
         } else if (message.type === 'drive115.refresh_token_v2') {
           try {
             const rt = String(message?.payload?.refreshToken || '').trim();
