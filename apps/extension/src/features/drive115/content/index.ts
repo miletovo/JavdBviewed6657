@@ -164,6 +164,8 @@ async function monitorAndOrganizeDrive115Download(params: {
     magnetName: string;
     button: HTMLButtonElement;
     before: Drive115FileSnapshot;
+    autoMarkWatched?: boolean;
+    autoMarkWatchedStars?: number;
 }): Promise<void> {
     const svc = getDrive115V2Service();
     const token = await svc.getValidAccessToken({ forceAutoRefresh: true });
@@ -270,6 +272,13 @@ async function monitorAndOrganizeDrive115Download(params: {
         params.videoId + ' 下载完成，已整理 ' + sorted.length + ' 个视频（移动 ' + moved + '，重命名 ' + renamed + '）',
         'success',
     );
+    if (params.autoMarkWatched) {
+        try {
+            await markVideoAsWatched(params.videoId, params.autoMarkWatchedStars || 4);
+        } catch (error) {
+            showToast('影片已整理，但自动标记已看失败：' + (error instanceof Error ? error.message : String(error)), 'info');
+        }
+    }
 }
 
 async function inject115ButtonsIntoNativeMagnetList(): Promise<void> {
@@ -698,6 +707,8 @@ export async function handlePushToDrive115(
                     magnetName,
                     button,
                     before: beforeFolderSnapshot,
+                    autoMarkWatched: cachedSettings.autoMarkWatchedAfter115,
+                    autoMarkWatchedStars: cachedSettings.autoMarkWatchedStars,
                 }).catch((error) => {
                     log('[Drive115] Auto-organize monitor failed:', error);
                 });
@@ -724,43 +735,7 @@ export async function handlePushToDrive115(
 
 
 
-            // 推送成功后自动标记为已看（受设置控制）
-            try {
-                const autoMark = cachedSettings.autoMarkWatchedAfter115;
-                const stars = cachedSettings.autoMarkWatchedStars;
-                if (autoMark) {
-                    await beginStage('mark-watched', `stars=${stars}`, 80);
-                    log('开始标记视频为已看...');
-                    console.log('[JavDB Ext] 开始标记视频为已看...');
-                    const task = getRootTask();
-                    await progressManagedTask(task.taskId, { stage: 'mark-watched', detail: `stars=${stars}`, progressPct: 85 });
-                    await markVideoAsWatched(videoId, stars);
-                    endStage('mark-watched', 'done', `stars=${stars}`);
-                    log('markVideoAsWatched函数执行完毕');
-                    console.log('[JavDB Ext] markVideoAsWatched函数执行完毕');
-
-                    // 由于markVideoAsWatched内部会刷新页面，不需要恢复按钮状态
-                    await progressManagedTask(task.taskId, { stage: 'done', detail: 'push + mark complete', progressPct: 100 });
-                    await completeManagedTask(task.taskId);
-                    return;
-                }
-            } catch (error) {
-                endStage('mark-watched', 'error', error instanceof Error ? error.message : String(error), error instanceof Error ? error.message : String(error));
-                console.warn('自动标记已看失败或被关闭:', error);
-                console.error('[JavDB Ext] 自动标记已看失败或被关闭:', error);
-                try {
-                    const errMsg = error instanceof Error ? error.message : String(error);
-                    showToast(`已推送到115。自动标记已看：${errMsg || '已关闭'}`, 'info');
-                } catch {}
-
-                // 关闭或失败时，仍然恢复按钮状态
-                setTimeout(() => {
-                    button.innerHTML = originalText;
-                    button.disabled = false;
-                    button.className = 'button is-success is-small drive115-push-btn';
-                    button.dataset.drive115Force = '1';
-                }, 3000);
-            }
+            // 自动标记已看已延后到离线任务完成并整理成功后执行，避免提前刷新页面中断后台整理。
             const task = getRootTask();
             await progressManagedTask(task.taskId, { stage: 'done', detail: 'push complete', progressPct: 100 });
             await completeManagedTask(task.taskId);
