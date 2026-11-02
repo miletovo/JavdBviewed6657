@@ -468,6 +468,27 @@ describe('MediaItemDetailPanel runtime behavior', () => {
     await mounted.unmount();
   });
 
+
+  it('shows a direct 115vod link for an indexed 115 video', async () => {
+    const item = makeItem({
+      source: '115',
+      itemId: undefined,
+      serverUrl: undefined,
+      pickCode: 'pick-code-115',
+      fileName: 'MIDA-001.mp4',
+    });
+    const mounted = mount(item);
+    await mounted.rerender(item);
+
+    const link = mounted.host.querySelector<HTMLAnchorElement>(
+      'a[href="https://115vod.com/?pickcode=pick-code-115&share_id=0"]',
+    );
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toContain('115 网页播放');
+
+    await mounted.unmount();
+  });
+
   describe('连接类失败块（远端媒体服务器不可达）', () => {
     it('连接超时时渲染明确失败块 + 重试/关闭，不显示「（仍可播放）」', async () => {
       const mounted = mount(makeItem());
