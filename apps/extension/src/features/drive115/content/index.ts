@@ -332,9 +332,11 @@ async function monitorAndOrganizeDrive115Download(params: {
 
     // 仅清理「本次新增」且扩展名明确属于种子/系统杂项的文件。
     // NFO、字幕、图片、TXT 说明及未知格式均保留，不对旧文件执行删除。
-    const junkFiles = collected.filter((file) => (
-        !isDrive115VideoFileName(file.name) && isDrive115TaskJunkFileName(file.name)
-    ));
+    const junkFiles = params.autoCleanupAfter115Download === true
+        ? collected.filter((file) => (
+            !isDrive115VideoFileName(file.name) && isDrive115TaskJunkFileName(file.name)
+        ))
+        : [];
     let deleted = 0;
     for (let index = 0; index < junkFiles.length; index += 50) {
         const batch = junkFiles.slice(index, index + 50);
