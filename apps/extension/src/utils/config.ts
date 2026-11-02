@@ -77,6 +77,8 @@ export const STORAGE_KEYS = {
     DRIVE115_LIBRARY_INDEX_HISTORY: 'drive115_library_index_history',
     // 115 片库 24 小时目录清单缓存（发现态复用，减少重复列目录请求）
     DRIVE115_LIBRARY_INDEX_DIR_MANIFEST: 'drive115_library_index_dir_manifest',
+    // 115 离线下载完成后自动整理任务（不含 access token）
+    DRIVE115_OFFLINE_ORGANIZER_JOBS: 'drive115_offline_organizer_jobs',
 
     // 媒体库：真实已看 → 115 待清理清单
     MEDIA_115_CLEANUP_LIST: 'media_115_cleanup_list',
