@@ -13,6 +13,7 @@ import {
   isDrive115TaskJunkFileName,
   isDrive115VideoFileName,
   type Drive115NewFileLike,
+  type Drive115OfflineTaskLike,
 } from './offlineOrganizerModel';
 
 export const DRIVE115_OFFLINE_ORGANIZER_ALARM = 'drive115-offline-organizer';
@@ -456,8 +457,8 @@ export async function handleDrive115OfflineOrganizerAlarm(alarmName: string): Pr
         job.updatedAt = now;
         continue;
       }
-      const findTask = (tasks: readonly unknown[]) => findDrive115OfflineTask(
-        tasks as Array<{ info_hash?: unknown; hash?: unknown; name?: unknown; wp_path_id?: unknown; status?: unknown }>,
+      const findTask = (tasks: readonly Drive115OfflineTaskLike[]) => findDrive115OfflineTask(
+        tasks,
         {
           taskHash: job.taskHash,
           folderId: job.folderId,
