@@ -7,7 +7,6 @@ import {
   classifyFolderEntries,
   pickPrimaryCover,
   pickPrimaryNfo,
-  pickPrimaryVideo,
   rankNfoCandidates,
 } from './classifyFolderEntries';
 import { resolveEntryCode, resolveEntryTitle } from './parseEntryMeta';
@@ -149,38 +148,42 @@ function splitFiles(items: Array<Record<string, unknown>>): Array<Record<string,
   return items.filter((item) => item && typeof item === 'object' && !isFolderItem(item));
 }
 
-function buildEntry(params: {
+function buildEntries(params: {
   rootCid: string;
   folderCid: string;
   folderName: string;
   files: Array<Record<string, unknown>>;
   now: number;
-}): { entry: Drive115LibraryEntry | null; skipReason?: 'no_video' | 'no_pickcode' } {
+}): { entries: Drive115LibraryEntry[]; skipReason?: 'no_video' | 'no_pickcode' } {
   const classified = classifyFolderEntries(params.files);
-  const video = pickPrimaryVideo(classified.videos);
-  if (!video) {
-    return { entry: null, skipReason: 'no_video' };
+  if (!classified.videos.length) {
+    return { entries: [], skipReason: 'no_video' };
   }
-  if (!video.pickCode) {
-    return { entry: null, skipReason: 'no_pickcode' };
-  }
-  const initialNfo = pickPrimaryNfo(classified.nfos, video.fileName);
-  const codeInfo = resolveEntryCode({
-    folderName: params.folderName,
-    videoFileName: video.fileName,
-    nfoFileName: initialNfo?.fileName,
-  });
-  const nfoCandidates = rankNfoCandidates(classified.nfos, codeInfo.code, video.fileName);
-  const nfo = nfoCandidates[0] || null;
-  const cover = pickPrimaryCover(classified.covers, codeInfo.code);
-  const title = resolveEntryTitle({
-    code: codeInfo.code,
-    folderName: params.folderName,
-    videoFileName: video.fileName,
-  });
 
-  return {
-    entry: {
+  // One folder may contain multiple playable video files. Keep one index row per file
+  // so each pick_code can be opened independently from JavDB and the media library.
+  const playableVideos = classified.videos.filter((video) => Boolean(video.pickCode));
+  if (!playableVideos.length) {
+    return { entries: [], skipReason: 'no_pickcode' };
+  }
+
+  const entries = playableVideos.map((video): Drive115LibraryEntry => {
+    const initialNfo = pickPrimaryNfo(classified.nfos, video.fileName);
+    const codeInfo = resolveEntryCode({
+      videoFileName: video.fileName,
+      folderName: params.folderName,
+      nfoFileName: initialNfo?.fileName,
+    });
+    const nfoCandidates = rankNfoCandidates(classified.nfos, codeInfo.code, video.fileName);
+    const nfo = nfoCandidates[0] || null;
+    const cover = pickPrimaryCover(classified.covers, codeInfo.code);
+    const title = resolveEntryTitle({
+      code: codeInfo.code,
+      folderName: params.folderName,
+      videoFileName: video.fileName,
+    });
+
+    return {
       key: `${params.folderCid}:${video.fileId}`,
       code: codeInfo.code,
       title,
@@ -203,8 +206,10 @@ function buildEntry(params: {
         ...(candidate.pickCode ? { pickCode: candidate.pickCode } : {}),
       })),
       updatedAt: params.now,
-    },
-  };
+    };
+  });
+
+  return { entries };
 }
 
 type ListedFolder = {
@@ -716,16 +721,17 @@ export async function indexDrive115Roots(
         if (!listed) continue;
         markManifestProcessed(item.cid);
 
-        const built = buildEntry({
+        const built = buildEntries({
           rootCid: item.rootCid,
           folderCid: listed.cid,
           folderName: listed.name,
           files: listed.data,
           now: now(),
         });
-        if (built.entry) {
+        if (built.entries.length > 0) {
+          // foldersSeen counts folders; indexed counts individual playable video files.
           stats.foldersSeen += 1;
-          pushIndexedEntry(built.entry);
+          for (const entry of built.entries) pushIndexedEntry(entry);
           checkpointQueue = queue.slice(index + 1);
           continue;
         }
