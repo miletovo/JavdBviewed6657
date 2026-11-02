@@ -489,6 +489,53 @@ describe('MediaItemDetailPanel runtime behavior', () => {
     await mounted.unmount();
   });
 
+  it('shows a separate 115vod playback link for every indexed 115 video copy', async () => {
+    const item = makeItem({
+      source: '115',
+      itemId: 'file-a',
+      serverUrl: undefined,
+      pickCode: 'pick-a',
+      fileName: 'SSIS-001-CD1.mp4',
+      libraryKey: 'folder-a:file-a',
+      nfoSummary: { schemaVersion: 4 } as MediaBrowseItem['nfoSummary'],
+      copies: [
+        {
+          copyId: '115:file-a',
+          source: '115',
+          itemId: 'file-a',
+          fileId: 'file-a',
+          pickCode: 'pick-a',
+          fileName: 'SSIS-001-CD1.mp4',
+          folderPath: 'SSIS-001',
+        },
+        {
+          copyId: '115:file-b',
+          source: '115',
+          itemId: 'file-b',
+          fileId: 'file-b',
+          pickCode: 'pick-b',
+          fileName: 'SSIS-001-CD2.mkv',
+          folderPath: 'SSIS-001',
+        },
+      ],
+    });
+    const mounted = mount(item);
+
+    await mounted.rerender(item);
+
+    const links = Array.from(
+      mounted.host.querySelectorAll<HTMLAnchorElement>('a[data-media-source-open-link="1"]'),
+    );
+    expect(links.map((link) => link.href)).toEqual([
+      'https://115vod.com/?pickcode=pick-a&share_id=0',
+      'https://115vod.com/?pickcode=pick-b&share_id=0',
+    ]);
+    expect(mounted.host.textContent).toContain('SSIS-001-CD1.mp4');
+    expect(mounted.host.textContent).toContain('SSIS-001-CD2.mkv');
+
+    await mounted.unmount();
+  });
+
   describe('连接类失败块（远端媒体服务器不可达）', () => {
     it('连接超时时渲染明确失败块 + 重试/关闭，不显示「（仍可播放）」', async () => {
       const mounted = mount(makeItem());
