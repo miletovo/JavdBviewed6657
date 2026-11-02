@@ -4,6 +4,7 @@
  * @module features/drive115/mediaLibrary
  */
 import { STORAGE_KEYS } from '../../../utils/config';
+import { normalizeVideoCodeCandidate } from '../../../shared/utils/videoCodeExtractor';
 import { getValue, setValue } from '../../../utils/storage';
 import type { ParsedNfoSummary } from './parseEntryMeta';
 import {
@@ -312,14 +313,20 @@ export function isDrive115IndexDirManifestUsable(
   return manifest.scanDepth === clampScanDepth(scanDepth);
 }
 
+function normalizeLookupCode(value: unknown): string {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  return (normalizeVideoCodeCandidate(raw) || raw).toUpperCase();
+}
+
 /**
- * 按番号查找（供后续角标/播放复用）
+ * 按规范化番号查找（与索引解析共用标准化规则，兼容连字符/下划线/空格差异）。
  */
 export function lookupByCode(
   state: Drive115LibraryIndexState | null | undefined,
   code: string,
 ): Drive115LibraryEntry[] {
-  const target = String(code || '').trim().toUpperCase();
+  const target = normalizeLookupCode(code);
   if (!target || !state?.entries?.length) return [];
-  return state.entries.filter((e) => e.code && e.code.toUpperCase() === target);
+  return state.entries.filter((entry) => normalizeLookupCode(entry.code) === target);
 }
