@@ -135,7 +135,8 @@ async function uploadRemoteImageTo115(payload: any): Promise<{ success: boolean;
     if (!endpointValue || !bucket || !object || !secret || !accessKeyId || !securityToken) {
       return { success: false, message: '115 上传凭据或初始化结果不完整' };
     }
-    const callbackValue = Array.isArray(init.callback) ? init.callback[0] : init.callback;
+    const callbackContainer = Array.isArray(init.callback) ? init.callback[0] : init.callback;
+    const callbackValue = callbackContainer?.value || callbackContainer;
     const callback = String(callbackValue?.callback || '').trim();
     const callbackVar = String(callbackValue?.callback_var || '').trim();
     if (!callback) return { success: false, message: '115 上传初始化未返回 callback' };
