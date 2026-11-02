@@ -4,7 +4,7 @@
 
 import { isDrive115Enabled, addTaskUrlsV2, downloadOffline as routerDownloadOffline } from '../router';
 import { addLogV2 } from '../v2/logs';
-// getDrive115V2Service 已移除，配额功能已迁移至dashboard
+import { getDrive115V2Service } from '../v2';
 import { waitForElement } from '../../../platform/browser/domUtils';
 // extractVideoIdFromPage 已集成到推送按钮逻辑中
 import { showToast } from '../../../platform/browser/toast';
@@ -109,6 +109,168 @@ async function fetchWithTimeoutRetry(
     throw lastError ?? new Error('网络请求失败');
 }
 
+
+type Drive115FileSnapshot = {
+    fileIds: Set<string>;
+    folderIds: Set<string>;
+};
+
+function getDrive115ItemId(item: Record<string, any>): string {
+    return String(item.file_id ?? item.fid ?? item.cid ?? '').trim();
+}
+
+function getDrive115ItemName(item: Record<string, any>): string {
+    return String(item.file_name ?? item.fn ?? item.name ?? '').trim();
+}
+
+function isDrive115Folder(item: Record<string, any>): boolean {
+    return String(item.fc ?? item.file_category ?? '') === '0'
+        || item.is_dir === true
+        || item.is_directory === true;
+}
+
+function isDrive115Video(name: string): boolean {
+    return /\.(mp4|mkv|avi|mov|wmv|flv|ts|m4v|iso|webm)$/i.test(name);
+}
+
+async function snapshotDrive115Folder(folderId: string): Promise<Drive115FileSnapshot> {
+    const svc = getDrive115V2Service();
+    const token = await svc.getValidAccessToken({ forceAutoRefresh: true });
+    if (!token.success || !token.accessToken) throw new Error(token.message || '无法获取 115 授权');
+    const listed = await svc.listFiles({
+        accessToken: token.accessToken,
+        cid: folderId,
+        limit: 1150,
+        show_dir: 1,
+        stdir: 1,
+        cur: 1,
+    });
+    if (!listed.success) throw new Error(listed.message || '读取 115 目标目录失败');
+    const fileIds = new Set<string>();
+    const folderIds = new Set<string>();
+    for (const item of listed.data || []) {
+        const id = getDrive115ItemId(item as Record<string, any>);
+        if (!id) continue;
+        if (isDrive115Folder(item as Record<string, any>)) folderIds.add(id);
+        else fileIds.add(id);
+    }
+    return { fileIds, folderIds };
+}
+
+async function monitorAndOrganizeDrive115Download(params: {
+    videoId: string;
+    folderId: string;
+    taskHash?: string;
+    magnetName: string;
+    button: HTMLButtonElement;
+    before: Drive115FileSnapshot;
+}): Promise<void> {
+    const svc = getDrive115V2Service();
+    const token = await svc.getValidAccessToken({ forceAutoRefresh: true });
+    if (!token.success || !token.accessToken) {
+        showToast(params.videoId + ' 已提交到 115，但无法继续监控整理：' + (token.message || '授权不可用'), 'info');
+        return;
+    }
+
+    const accessToken = token.accessToken;
+    const deadline = Date.now() + 15 * 60 * 1000;
+    let completed = false;
+    let failed = false;
+    while (Date.now() < deadline) {
+        await delay(15000);
+        const taskList = await svc.getTaskList({ accessToken, page: 1 });
+        const tasks = taskList.success ? (taskList.data?.tasks || []) : [];
+        const task = params.taskHash
+            ? tasks.find((candidate) => String(candidate.info_hash || '').toLowerCase() === params.taskHash?.toLowerCase())
+            : tasks.find((candidate) => String(candidate.wp_path_id || '') === params.folderId
+                && (String(candidate.name || '').includes(params.videoId) || String(candidate.name || '').includes(params.magnetName)));
+        if (task?.status === -1) {
+            failed = true;
+            break;
+        }
+        if (task?.status === 2) {
+            completed = true;
+            break;
+        }
+    }
+
+    if (!completed) {
+        showToast(
+            failed
+                ? params.videoId + ' 的 115 离线任务失败，请检查 115 任务列表'
+                : params.videoId + ' 已提交到 115，仍在下载；下载完成后请重新打开详情页检查整理状态',
+            failed ? 'error' : 'info',
+        );
+        return;
+    }
+
+    const collected: Array<{ id: string; name: string; parentId: string }> = [];
+    const scan = async (folderId: string, depth: number): Promise<void> => {
+        const listed = await svc.listFiles({
+            accessToken,
+            cid: folderId,
+            limit: 1150,
+            show_dir: 1,
+            stdir: 1,
+            cur: 1,
+        });
+        if (!listed.success) return;
+        for (const raw of listed.data || []) {
+            const item = raw as Record<string, any>;
+            const id = getDrive115ItemId(item);
+            const name = getDrive115ItemName(item);
+            if (!id) continue;
+            if (isDrive115Folder(item)) {
+                if (depth < 2 && !params.before.folderIds.has(id)) await scan(id, depth + 1);
+                continue;
+            }
+            if (!params.before.fileIds.has(id) && isDrive115Video(name)) {
+                collected.push({ id, name, parentId: folderId });
+            }
+        }
+    };
+
+    await scan(params.folderId, 0);
+    if (!collected.length) {
+        showToast(params.videoId + ' 的离线任务已完成，但目标目录中未发现新视频文件', 'info');
+        return;
+    }
+
+    let moved = 0;
+    let renamed = 0;
+    const sorted = collected.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+    for (let index = 0; index < sorted.length; index += 1) {
+        const file = sorted[index];
+        if (file.parentId !== params.folderId) {
+            const move = await svc.moveFiles({
+                accessToken,
+                fileIds: [file.id],
+                targetFolderId: params.folderId,
+            });
+            if (move.success) moved += 1;
+        }
+        const extension = file.name.match(/\.[^.]+$/)?.[0] || '';
+        const suffix = sorted.length > 1 ? '-' + String(index + 1).padStart(2, '0') : '';
+        const nextName = params.videoId + suffix + extension;
+        if (file.name !== nextName) {
+            const rename = await svc.renameFile({
+                accessToken,
+                fileId: file.id,
+                fileName: nextName,
+            });
+            if (rename.success) renamed += 1;
+        }
+    }
+
+    if (params.button.isConnected) {
+        params.button.innerHTML = '整理完成';
+        params.button.className = 'button is-success is-small drive115-push-btn';
+    }
+    showToast(
+        params.videoId + ' 下载完成，已整理 ' + sorted.length + ' 个视频（移动 ' + moved + '，重命名 ' + renamed + '）',
+        'success',
+    );
+}
 
 async function inject115ButtonsIntoNativeMagnetList(): Promise<void> {
     const container = await waitForElement('#magnets-content', 1500, 120);
@@ -485,10 +647,25 @@ export async function handlePushToDrive115(
         try {
             await beginStage('prepare', `videoId=${videoId}`, 5);
             await addLogV2({ timestamp: Date.now(), level: 'info', message: `内容脚本：发起 115 推送，videoId=${videoId}，name=${magnetName}，magnet=${magnetUrl}，page=${window.location.href}` });
-            const wpPathId = directorySelection.cid;
+            const parentWpPathId = String(directorySelection.cid || cachedSettings.downloadDir || '0').trim() || '0';
+            const drive115Service = getDrive115V2Service();
+            const auth = await drive115Service.getValidAccessToken({ forceAutoRefresh: true });
+            if (!auth.success || !auth.accessToken) {
+                throw new Error(auth.message || '无法获取 115 授权');
+            }
+            const ensuredFolder = await drive115Service.ensureFolder({
+                accessToken: auth.accessToken,
+                parentId: parentWpPathId,
+                folderName: videoId,
+            });
+            if (!ensuredFolder.success || !ensuredFolder.folderId) {
+                throw new Error(ensuredFolder.message || '创建番号文件夹失败，未提交磁力任务');
+            }
+            const wpPathId = ensuredFolder.folderId;
+            const beforeFolderSnapshot = await snapshotDrive115Folder(wpPathId);
 
-            endStage('prepare', 'done', 'request prepared');
-            await beginStage('push-api', `wpPathId=${wpPathId ?? 'root'}`, 40);
+            endStage('prepare', 'done', 'number folder ready: ' + wpPathId);
+            await beginStage('push-api', `wpPathId=${wpPathId}`, 40);
             const task = getRootTask();
             console.info('[115Trace] content:addTaskUrls:start', {
                 traceId,
@@ -511,7 +688,20 @@ export async function handlePushToDrive115(
             });
             result = { success: res.success, data: res.data, error: res.message };
             if (res.success) {
-                endStage('push-api', 'done', `returned=${Array.isArray(res.data) ? res.data.length : 0}`);
+                const taskHash = Array.isArray(res.data)
+                    ? String(res.data.find((entry: any) => entry?.info_hash)?.info_hash || '')
+                    : '';
+                void monitorAndOrganizeDrive115Download({
+                    videoId,
+                    folderId: wpPathId,
+                    taskHash: taskHash || undefined,
+                    magnetName,
+                    button,
+                    before: beforeFolderSnapshot,
+                }).catch((error) => {
+                    log('[Drive115] Auto-organize monitor failed:', error);
+                });
+                endStage('push-api', 'done', `returned=${Array.isArray(res.data) ? res.data.length : 0}; folder=${wpPathId}`);
                 const returned = Array.isArray(res.data) ? res.data.length : 0;
                 await addLogV2({ timestamp: Date.now(), level: 'info', message: `内容脚本：推送成功，返回 ${returned} 项，videoId=${videoId}` });
                 const task = getRootTask();
