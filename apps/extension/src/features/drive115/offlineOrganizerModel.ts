@@ -34,9 +34,11 @@ export function findDrive115OfflineTask(
 ): Drive115OfflineTaskLike | undefined {
   const taskHash = normalizeHash(params.taskHash);
   if (taskHash) {
-    const exact = tasks.find((task) => (
-      normalizeHash(task.info_hash || task.hash) === taskHash
-    ));
+    const exact = tasks.find((task) => {
+      if (normalizeHash(task.info_hash || task.hash) !== taskHash) return false;
+      const taskFolderId = normalizeText(task.wp_path_id);
+      return !taskFolderId || taskFolderId === normalizeText(params.folderId);
+    });
     if (exact) return exact;
   }
 
@@ -67,7 +69,7 @@ export function isDrive115TaskJunkFileName(name: string): boolean {
   if (!value) return false;
   return /(?:^|\\/)(?:thumbs\.db|desktop\.ini|\.ds_store)$/i.test(value)
     || /^__padding_file_/i.test(value)
-    || /\.(?:pad|torrent|url|html?|sfv|md5|sha1|log)$/i.test(value);
+    || /\.(?:pad|torrent)$/i.test(value);
 }
 
 /**
