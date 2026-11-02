@@ -20,6 +20,12 @@ import {
 } from '../ui/manualPushDirectory';
 import { completeManagedTask, createManagedTaskDescriptor, ensureManagedTaskRegistered, failManagedTask, progressManagedTask, requestTaskLease, runChunkedWork, saveSubtaskDetail, waitForTaskLease, yieldToMainThread } from '../../../platform/tasks';
 import { getPageContext } from '../../../platform/browser';
+import {
+    buildDrive115OrganizedVideoNames,
+    findDrive115OfflineTask,
+    isDrive115TaskJunkFileName,
+    isDrive115VideoFileName,
+} from '../offlineOrganizerModel';
 
 type Drive115PushSettingsCache = {
     enabled: boolean;
@@ -113,6 +119,14 @@ async function fetchWithTimeoutRetry(
 type Drive115FileSnapshot = {
     fileIds: Set<string>;
     folderIds: Set<string>;
+    rootFileNames: Set<string>;
+};
+
+type Drive115ListedFile = {
+    id: string;
+    name: string;
+    parentId: string;
+    isFolder: boolean;
 };
 
 function getDrive115ItemId(item: Record<string, any>): string {
@@ -129,72 +143,83 @@ function isDrive115Folder(item: Record<string, any>): boolean {
         || item.is_directory === true;
 }
 
-function isDrive115Video(name: string): boolean {
-    return /\.(mp4|mkv|avi|mov|wmv|flv|ts|m4v|iso|webm)$/i.test(name);
+/** 读取完整目录分页，避免超过 1150 项时漏掉旧文件快照或新下载文件。 */
+async function listAllDrive115FolderItems(
+    svc: ReturnType<typeof getDrive115V2Service>,
+    accessToken: string,
+    folderId: string,
+): Promise<Array<Record<string, any>>> {
+    const all: Array<Record<string, any>> = [];
+    const limit = 1150;
+    let offset = 0;
+    for (let page = 0; page < 100; page += 1) {
+        const listed = await svc.listFiles({
+            accessToken,
+            cid: folderId,
+            limit,
+            offset,
+            show_dir: 1,
+            stdir: 1,
+            cur: 1,
+        });
+        if (!listed.success) throw new Error(listed.message || '读取 115 目录失败');
+        const data = Array.isArray(listed.data) ? listed.data as Array<Record<string, any>> : [];
+        if (!data.length) break;
+        all.push(...data);
+        offset += data.length;
+        const count = Number(listed.count || 0);
+        if (data.length < limit || (count > 0 && offset >= count)) break;
+    }
+    return all;
+}
+
+/** 递归遍历目录树；快照和完成后扫描使用同一深度，保证文件 ID 比较可靠。 */
+async function walkDrive115Folder(
+    svc: ReturnType<typeof getDrive115V2Service>,
+    accessToken: string,
+    rootFolderId: string,
+    visitor: (entry: Drive115ListedFile, depth: number) => void,
+    maxDepth = 3,
+): Promise<void> {
+    const visited = new Set<string>();
+    const visit = async (folderId: string, depth: number): Promise<void> => {
+        if (visited.has(folderId)) return;
+        visited.add(folderId);
+        const items = await listAllDrive115FolderItems(svc, accessToken, folderId);
+        for (const item of items) {
+            const id = getDrive115ItemId(item);
+            if (!id) continue;
+            const entry: Drive115ListedFile = {
+                id,
+                name: getDrive115ItemName(item),
+                parentId: folderId,
+                isFolder: isDrive115Folder(item),
+            };
+            visitor(entry, depth);
+            if (entry.isFolder && depth < maxDepth) {
+                await visit(id, depth + 1);
+            }
+        }
+    };
+    await visit(rootFolderId, 0);
 }
 
 async function snapshotDrive115Folder(folderId: string): Promise<Drive115FileSnapshot> {
     const svc = getDrive115V2Service();
     const token = await svc.getValidAccessToken({ forceAutoRefresh: true });
     if (!token.success || !token.accessToken) throw new Error(token.message || '无法获取 115 授权');
-    const listed = await svc.listFiles({
-        accessToken: token.accessToken,
-        cid: folderId,
-        limit: 1150,
-        show_dir: 1,
-        stdir: 1,
-        cur: 1,
-    });
-    if (!listed.success) throw new Error(listed.message || '读取 115 目标目录失败');
     const fileIds = new Set<string>();
     const folderIds = new Set<string>();
-    for (const item of listed.data || []) {
-        const id = getDrive115ItemId(item as Record<string, any>);
-        if (!id) continue;
-        if (isDrive115Folder(item as Record<string, any>)) folderIds.add(id);
-        else fileIds.add(id);
-    }
-    return { fileIds, folderIds };
-}
-
-function normalizePageImageUrl(value: string | null | undefined): string {
-    const raw = String(value || '').trim();
-    if (!raw) return '';
-    try {
-        const url = new URL(raw, window.location.href);
-        return url.protocol === 'https:' || url.protocol === 'http:' ? url.toString() : '';
-    } catch {
-        return '';
-    }
-}
-
-function collectJavDbMediaAssets(): { coverUrl?: string; previewUrls: string[] } {
-    const poster = document.querySelector<HTMLImageElement>('.video-cover img, .movie-panel-info .cover img, .cover img');
-    const metaImage = document.querySelector<HTMLMetaElement>('meta[property="og:image"]')?.content;
-    const coverUrl = normalizePageImageUrl(
-        poster?.currentSrc || poster?.dataset.src || poster?.getAttribute('data-original') || poster?.src || metaImage,
-    );
-    const previews = Array.from(document.querySelectorAll<HTMLImageElement>(
-        '.preview-images img, .preview-image img, .video-preview img, .preview-images a[href]',
-    ))
-        .map((node) => {
-            const raw = node instanceof HTMLImageElement
-                ? (node.currentSrc || node.dataset.src || node.getAttribute('data-original') || node.src)
-                : (node as unknown as HTMLAnchorElement).href;
-            return normalizePageImageUrl(raw);
-        })
-        .filter((url) => Boolean(url) && url !== coverUrl);
-    return { coverUrl: coverUrl || undefined, previewUrls: Array.from(new Set(previews)).slice(0, 6) };
-}
-
-function getPageImageExtension(sourceUrl: string): string {
-    try {
-        const pathname = new URL(sourceUrl).pathname;
-        const extension = pathname.match(/\.(jpe?g|png|webp|gif|avif)$/i)?.[0];
-        return extension ? extension.toLowerCase() : '.jpg';
-    } catch {
-        return '.jpg';
-    }
+    const rootFileNames = new Set<string>();
+    await walkDrive115Folder(svc, token.accessToken, folderId, (entry, depth) => {
+        if (entry.isFolder) {
+            folderIds.add(entry.id);
+            return;
+        }
+        fileIds.add(entry.id);
+        if (depth === 0 && entry.name) rootFileNames.add(entry.name);
+    });
+    return { fileIds, folderIds, rootFileNames };
 }
 
 async function monitorAndOrganizeDrive115Download(params: {
@@ -206,34 +231,39 @@ async function monitorAndOrganizeDrive115Download(params: {
     before: Drive115FileSnapshot;
     autoMarkWatched?: boolean;
     autoMarkWatchedStars?: number;
-    parentRootId: string;
-    coverUrl?: string;
-    previewUrls: string[];
 }): Promise<void> {
     const svc = getDrive115V2Service();
-    const token = await svc.getValidAccessToken({ forceAutoRefresh: true });
-    if (!token.success || !token.accessToken) {
-        showToast(params.videoId + ' 已提交到 115，但无法继续监控整理：' + (token.message || '授权不可用'), 'info');
-        return;
-    }
-
-    const accessToken = token.accessToken;
-    const deadline = Date.now() + 15 * 60 * 1000;
+    const deadline = Date.now() + 24 * 60 * 60 * 1000;
     let completed = false;
     let failed = false;
+    let lastPollError = '';
+
+    // 离线任务可能持续数小时；每轮重新获取有效 token，避免长时间等待后令牌过期。
     while (Date.now() < deadline) {
-        await delay(15000);
-        const taskList = await svc.getTaskList({ accessToken, page: 1 });
-        const tasks = taskList.success ? (taskList.data?.tasks || []) : [];
-        const task = params.taskHash
-            ? tasks.find((candidate) => String(candidate.info_hash || '').toLowerCase() === params.taskHash?.toLowerCase())
-            : tasks.find((candidate) => String(candidate.wp_path_id || '') === params.folderId
-                && (String(candidate.name || '').includes(params.videoId) || String(candidate.name || '').includes(params.magnetName)));
-        if (task?.status === -1) {
+        await delay(30000);
+        const token = await svc.getValidAccessToken({ forceAutoRefresh: true });
+        if (!token.success || !token.accessToken) {
+            lastPollError = token.message || '115 授权暂不可用';
+            continue;
+        }
+        const taskList = await svc.getTaskList({ accessToken: token.accessToken, page: 1 });
+        if (!taskList.success) {
+            lastPollError = taskList.message || '读取 115 离线任务失败';
+            continue;
+        }
+        const task = findDrive115OfflineTask(taskList.data?.tasks || [], {
+            taskHash: params.taskHash,
+            folderId: params.folderId,
+            videoId: params.videoId,
+            magnetName: params.magnetName,
+        });
+        if (!task) continue;
+        const status = Number(task.status);
+        if (status === -1) {
             failed = true;
             break;
         }
-        if (task?.status === 2) {
+        if (status === 2) {
             completed = true;
             break;
         }
@@ -243,131 +273,83 @@ async function monitorAndOrganizeDrive115Download(params: {
         showToast(
             failed
                 ? params.videoId + ' 的 115 离线任务失败，请检查 115 任务列表'
-                : params.videoId + ' 已提交到 115，仍在下载；下载完成后请重新打开详情页检查整理状态',
+                : params.videoId + ' 已提交到 115，仍在下载或等待中；' + (lastPollError ? '最近一次监控提示：' + lastPollError : '整理监控超过 24 小时已停止'),
             failed ? 'error' : 'info',
         );
         return;
     }
 
-    const collected: Array<{ id: string; name: string; parentId: string }> = [];
-    const scan = async (folderId: string, depth: number): Promise<void> => {
-        const listed = await svc.listFiles({
-            accessToken,
-            cid: folderId,
-            limit: 1150,
-            show_dir: 1,
-            stdir: 1,
-            cur: 1,
-        });
-        if (!listed.success) return;
-        for (const raw of listed.data || []) {
-            const item = raw as Record<string, any>;
-            const id = getDrive115ItemId(item);
-            const name = getDrive115ItemName(item);
-            if (!id) continue;
-            if (isDrive115Folder(item)) {
-                if (depth < 2 && !params.before.folderIds.has(id)) await scan(id, depth + 1);
-                continue;
-            }
-            if (!params.before.fileIds.has(id) && isDrive115Video(name)) {
-                collected.push({ id, name, parentId: folderId });
-            }
-        }
-    };
+    // 先完整扫描再执行任何移动/重命名/删除，扫描失败时不碰云端现有文件。
+    const collected: Drive115ListedFile[] = [];
+    const token = await svc.getValidAccessToken({ forceAutoRefresh: true });
+    if (!token.success || !token.accessToken) {
+        showToast(params.videoId + ' 下载完成，但无法取得授权进行文件整理', 'error');
+        return;
+    }
+    await walkDrive115Folder(svc, token.accessToken, params.folderId, (entry) => {
+        if (!entry.isFolder && !params.before.fileIds.has(entry.id)) collected.push(entry);
+    });
 
-    await scan(params.folderId, 0);
-    if (!collected.length) {
-        showToast(params.videoId + ' 的离线任务已完成，但目标目录中未发现新视频文件', 'info');
+    const videos = collected.filter((file) => isDrive115VideoFileName(file.name));
+    if (!videos.length) {
+        showToast(params.videoId + ' 的离线任务已完成，但没有发现本次新增的视频文件', 'info');
         return;
     }
 
+    const arranged = buildDrive115OrganizedVideoNames(
+        params.videoId,
+        videos,
+        [...params.before.rootFileNames],
+    );
     let moved = 0;
     let renamed = 0;
-    const sorted = collected.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
-    for (let index = 0; index < sorted.length; index += 1) {
-        const file = sorted[index];
+    let failedOperations = 0;
+    for (const file of arranged) {
         if (file.parentId !== params.folderId) {
             const move = await svc.moveFiles({
-                accessToken,
+                accessToken: token.accessToken,
                 fileIds: [file.id],
                 targetFolderId: params.folderId,
             });
             if (move.success) moved += 1;
+            else failedOperations += 1;
         }
-        const extension = file.name.match(/\.[^.]+$/)?.[0] || '';
-        const suffix = sorted.length > 1 ? '-' + String(index + 1).padStart(2, '0') : '';
-        const nextName = params.videoId + suffix + extension;
-        if (file.name !== nextName) {
+        if (file.name !== file.nextName) {
             const rename = await svc.renameFile({
-                accessToken,
+                accessToken: token.accessToken,
                 fileId: file.id,
-                fileName: nextName,
+                fileName: file.nextName,
             });
             if (rename.success) renamed += 1;
+            else failedOperations += 1;
         }
     }
 
-    let uploadedImages = 0;
-    const imageAssets: Array<{ sourceUrl: string; fileName: string }> = [];
-    if (params.coverUrl) {
-        imageAssets.push({
-            sourceUrl: params.coverUrl,
-            fileName: params.videoId + '-poster' + getPageImageExtension(params.coverUrl),
+    // 仅清理「本次新增」且扩展名明确属于种子/系统杂项的文件。
+    // NFO、字幕、图片、TXT 说明及未知格式均保留，不对旧文件执行删除。
+    const junkFiles = collected.filter((file) => (
+        !isDrive115VideoFileName(file.name) && isDrive115TaskJunkFileName(file.name)
+    ));
+    let deleted = 0;
+    for (let index = 0; index < junkFiles.length; index += 50) {
+        const batch = junkFiles.slice(index, index + 50);
+        const remove = await svc.deleteFiles({
+            accessToken: token.accessToken,
+            fileIds: batch.map((file) => file.id),
         });
-    }
-    for (let index = 0; index < params.previewUrls.length; index += 1) {
-        const sourceUrl = params.previewUrls[index];
-        imageAssets.push({
-            sourceUrl,
-            fileName: params.videoId + '-preview-' + String(index + 1).padStart(2, '0') + getPageImageExtension(sourceUrl),
-        });
-    }
-    if (imageAssets.length) {
-        const currentFolder = await svc.listFiles({
-            accessToken,
-            cid: params.folderId,
-            limit: 1150,
-            show_dir: 1,
-            stdir: 1,
-            cur: 1,
-        });
-        const existingNames = new Set(
-            (currentFolder.data || []).map((item) => getDrive115ItemName(item as Record<string, any>).toLocaleLowerCase()),
-        );
-        for (const asset of imageAssets) {
-            if (existingNames.has(asset.fileName.toLocaleLowerCase())) continue;
-            const uploaded = await svc.uploadRemoteImage({
-                accessToken,
-                parentId: params.folderId,
-                fileName: asset.fileName,
-                sourceUrl: asset.sourceUrl,
-            });
-            if (uploaded.success) {
-                uploadedImages += 1;
-                existingNames.add(asset.fileName.toLocaleLowerCase());
-            } else {
-                log('[Drive115] Image upload skipped/failed:', asset.fileName, uploaded.message || '');
-            }
-        }
-    }
-
-    try {
-        chrome.runtime.sendMessage({
-            type: 'DRIVE115_MEDIA_LIBRARY_INDEX',
-            rootCids: [params.parentRootId],
-            rescanDirectoryStructure: true,
-        }, () => void chrome.runtime.lastError);
-    } catch {
-        // The index can still be refreshed manually from the media-library settings page.
+        if (remove.success) deleted += batch.length;
+        else failedOperations += batch.length;
     }
 
     if (params.button.isConnected) {
-        params.button.innerHTML = '整理完成';
+        params.button.innerHTML = failedOperations ? '整理部分完成' : '整理完成';
         params.button.className = 'button is-success is-small drive115-push-btn';
     }
     showToast(
-        params.videoId + ' 下载完成，已整理 ' + sorted.length + ' 个视频（移动 ' + moved + '，重命名 ' + renamed + '，上传图片 ' + uploadedImages + ' 张）',
-        'success',
+        params.videoId + ' 下载完成：视频 ' + videos.length + ' 个，移动 ' + moved
+        + '，重命名 ' + renamed + '，清理杂项 ' + deleted
+        + (failedOperations ? '；另有 ' + failedOperations + ' 项操作未成功' : ''),
+        failedOperations ? 'info' : 'success',
     );
     if (params.autoMarkWatched) {
         try {
