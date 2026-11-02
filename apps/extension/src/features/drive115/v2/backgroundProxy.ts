@@ -312,6 +312,74 @@ export function installDrive115V2Proxy(): void {
             sendResponse({ success: false, message: e?.message || '后台配额异常' });
             return false;
           }
+        } else if (message.type === 'drive115.manage_files_v2') {
+          try {
+            const payload = message?.payload || {};
+            const accessToken = String(payload.accessToken || '').trim();
+            const base = String(payload.baseUrl || 'https://proapi.115.com').replace(/\/$/, '');
+            const action = String(payload.action || '').trim();
+            if (!accessToken) {
+              sendResponse({ success: false, message: '缺少 accessToken' });
+              return false;
+            }
+
+            const form = new FormData();
+            let endpoint = '';
+            if (action === 'create_folder') {
+              endpoint = `${base}/open/folder/add`;
+              form.set('pid', String(payload.parentId ?? '0'));
+              form.set('file_name', String(payload.fileName || '').trim());
+            } else if (action === 'rename_file') {
+              endpoint = `${base}/open/ufile/update`;
+              form.set('file_id', String(payload.fileId || '').trim());
+              form.set('file_name', String(payload.fileName || '').trim());
+            } else if (action === 'move_files') {
+              endpoint = `${base}/open/ufile/move`;
+              const fileIds = Array.isArray(payload.fileIds)
+                ? payload.fileIds.map((id: unknown) => String(id || '').trim()).filter(Boolean)
+                : [];
+              form.set('file_ids', fileIds.join(','));
+              form.set('to_cid', String(payload.targetFolderId ?? '0'));
+            } else {
+              sendResponse({ success: false, message: '不支持的文件管理操作' });
+              return false;
+            }
+
+            const requiredFieldsValid = action === 'create_folder'
+              ? Boolean(String(payload.fileName || '').trim())
+              : action === 'rename_file'
+                ? Boolean(String(payload.fileId || '').trim() && String(payload.fileName || '').trim())
+                : Boolean(Array.isArray(payload.fileIds) && payload.fileIds.length);
+            if (!requiredFieldsValid) {
+              sendResponse({ success: false, message: '文件管理参数不完整' });
+              return false;
+            }
+
+            nativeFetch(endpoint, {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+                Accept: 'application/json',
+              },
+              body: form,
+            }).then(async (res) => {
+              const raw = await res.json().catch(() => ({} as any));
+              const ok = (typeof raw.state === 'boolean' ? raw.state : res.ok) && res.ok;
+              sendResponse({
+                success: ok,
+                message: ok ? undefined : (raw?.message || raw?.error || `文件管理操作失败 (${res.status})`),
+                data: raw?.data,
+                raw,
+                endpoint,
+              });
+            }).catch((err) => {
+              sendResponse({ success: false, message: friendlyRequestError(err, '后台文件管理请求失败') });
+            });
+            return true;
+          } catch (e: any) {
+            sendResponse({ success: false, message: e?.message || '后台文件管理异常' });
+            return false;
+          }
         } else if (message.type === 'drive115.delete_files_v2') {
           try {
             const accessToken = String(message?.payload?.accessToken || '').trim();
