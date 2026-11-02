@@ -47,6 +47,23 @@ describe('store', () => {
     expect(lookupByCode(state, 'ssis-001')).toHaveLength(1);
     expect(lookupByCode(state, 'NONE')).toHaveLength(0);
   });
+
+  it('matches separator variants using the shared video-code normalizer', () => {
+    const state = normalizeDrive115LibraryState({
+      entries: [
+        {
+          folderCid: 'f',
+          videoFileId: '1',
+          pickCode: 'p',
+          code: 'SSIS-001',
+          title: 'SSIS-001',
+          fileName: 'SSIS-001.mp4',
+        },
+      ],
+    });
+    expect(lookupByCode(state, 'ssis001')).toHaveLength(1);
+    expect(lookupByCode(state, 'SSIS_001')).toHaveLength(1);
+  });
 });
 
 import {
