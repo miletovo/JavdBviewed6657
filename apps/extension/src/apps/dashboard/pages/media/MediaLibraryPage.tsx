@@ -20,6 +20,7 @@ import { STORAGE_KEYS, isEmbyLibraryEnabled } from '../../../../utils/config';
 import { getSettings, getValue } from '../../../../utils/storage';
 import { sendRuntimeMessage } from '../../../../platform/browser/runtimeMessages';
 import { normalizeVideoCodeCandidate } from '../../../../shared/utils/videoCodeExtractor';
+import { buildDrive115WebPlayUrl } from '../../../../features/drive115/v2/drive115PlaybackActions';
 import {
   coverArtStyle,
   buildCarouselWindow,
@@ -29,6 +30,7 @@ import {
   DEFAULT_MEDIA_VIEW_SETTINGS,
   formatMediaSourceCopyLabel,
   getMediaSourceCopyPlaybackStatus,
+  getMediaSourceCopies,
   getMediaSourceLabels,
   heroItems,
   MEDIA_CARD_SIZE_OPTIONS,
@@ -2152,6 +2154,11 @@ const MediaCard = memo(function MediaCard({
   const isWatched = watchState === 'watched';
   const canPlay = usingPreview || resolvePlaybackChoice(item).kind !== 'unavailable';
 
+  const drive115Copy = getMediaSourceCopies(item).find((copy) => copy.source === '115' && Boolean(copy.pickCode));
+  const drive115WebPlayUrl = drive115Copy?.pickCode
+    ? buildDrive115WebPlayUrl({ pickCode: drive115Copy.pickCode })
+    : null;
+
   const playItem = () => {
     if (!usingPreview) {
       onPlayItem?.(item);
@@ -2354,7 +2361,21 @@ const MediaCard = memo(function MediaCard({
                 ✓
               </button>
             ) : null}
-            {item.source !== '115' && !usingPreview ? (
+            {drive115WebPlayUrl ? (
+              <button
+                type="button"
+                className="ml-card-overlay-icon ml-card-overlay-icon-text"
+                title="在 115vod 网页播放"
+                aria-label="在 115vod 网页播放"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  window.open(drive115WebPlayUrl, '_blank', 'noopener,noreferrer');
+                }}
+              >
+                115↗
+              </button>
+            ) : item.source !== '115' && !usingPreview ? (
               <button
                 type="button"
                 className="ml-card-overlay-icon ml-card-overlay-icon-text"
