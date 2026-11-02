@@ -62,7 +62,7 @@ async function hmacSha1Base64(secret: string, value: string): Promise<string> {
   return bytesToBase64(new Uint8Array(signature));
 }
 
-async function uploadRemoteImageTo115(payload: any): Promise<{ success: boolean; message?: string; fileId?: string; fileName?: string }> {
+export async function uploadRemoteImageTo115(payload: any): Promise<{ success: boolean; message?: string; fileId?: string; fileName?: string }> {
   const accessToken = String(payload.accessToken || '').trim();
   const sourceUrl = String(payload.sourceUrl || '').trim();
   const parentId = String(payload.parentId ?? '0').trim() || '0';
@@ -71,7 +71,19 @@ async function uploadRemoteImageTo115(payload: any): Promise<{ success: boolean;
   if (!accessToken || !sourceUrl || !fileName) return { success: false, message: '缺少图片上传参数' };
   let parsedSource: URL;
   try { parsedSource = new URL(sourceUrl); } catch { return { success: false, message: '图片地址无效' }; }
-  if (parsedSource.protocol !== 'https:' && parsedSource.protocol !== 'http:') return { success: false, message: '仅允许 HTTP/HTTPS 图片地址' };
+  if (parsedSource.protocol !== 'https:') return { success: false, message: '图片地址必须使用 HTTPS' };
+  const sourceHost = parsedSource.hostname.toLowerCase();
+  const allowedImageHost = sourceHost === 'javdb.com'
+    || sourceHost.endsWith('.javdb.com')
+    || sourceHost === 'javdb.net'
+    || sourceHost.endsWith('.javdb.net')
+    || sourceHost === 'javdb570.com'
+    || sourceHost.endsWith('.javdb570.com')
+    || sourceHost === 'javdb575.com'
+    || sourceHost.endsWith('.javdb575.com')
+    || sourceHost === 'jdbstatic.com'
+    || sourceHost.endsWith('.jdbstatic.com');
+  if (!allowedImageHost) return { success: false, message: '图片来源域名不在 JavDB 白名单内' };
 
   try {
     const imageResponse = await nativeFetch(parsedSource.toString(), { method: 'GET', headers: { Accept: 'image/*' } });
@@ -100,7 +112,8 @@ async function uploadRemoteImageTo115(payload: any): Promise<{ success: boolean;
       });
       const raw: any = await response.json().catch(() => ({}));
       if (!response.ok || raw.state === false) throw new Error(raw.message || raw.error || '115 上传初始化失败 (' + response.status + ')');
-      return raw.data || raw;
+      const data = raw.data;
+      return Array.isArray(data) ? (data[0] || {}) : (data || raw);
     };
 
     let init = await postInit();
@@ -165,9 +178,19 @@ async function uploadRemoteImageTo115(payload: any): Promise<{ success: boolean;
     };
     if (callbackVarHeader) headers['x-oss-callback-var'] = callbackVarHeader;
     const uploadResponse = await nativeFetch(uploadUrl, { method: 'PUT', headers, body: bytes });
+    const uploadBody = await uploadResponse.text().catch(() => '');
     if (!uploadResponse.ok) {
-      const detail = await uploadResponse.text().catch(() => '');
-      return { success: false, message: '上传图片到 115 OSS 失败 (' + uploadResponse.status + '): ' + detail.slice(0, 180) };
+      return { success: false, message: '上传图片到 115 OSS 失败 (' + uploadResponse.status + '): ' + uploadBody.slice(0, 180) };
+    }
+    if (uploadBody) {
+      try {
+        const callbackResult = JSON.parse(uploadBody);
+        if (callbackResult?.state === false) {
+          return { success: false, message: callbackResult.message || '115 图片上传回调失败' };
+        }
+      } catch {
+        // OSS 在部分成功场景返回空文本或非 JSON 文本；HTTP 2xx 仍视为已上传。
+      }
     }
     return { success: true, fileId: String(init.file_id || ''), fileName };
   } catch (error: any) {
