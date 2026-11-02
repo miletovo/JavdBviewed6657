@@ -36,6 +36,7 @@ type Drive115PushSettingsCache = {
     skipManualPushDirectoryPicker: boolean;
     autoMarkWatchedAfter115: boolean;
     autoMarkWatchedStars: number;
+    autoCleanupAfter115Download: boolean;
 };
 
 let drive115PushSettingsCache: Drive115PushSettingsCache | null = null;
@@ -55,6 +56,7 @@ async function refreshDrive115PushSettingsCache(): Promise<Drive115PushSettingsC
         skipManualPushDirectoryPicker: (settings as any)?.drive115?.skipManualPushDirectoryPicker === true,
         autoMarkWatchedAfter115: (settings as any)?.videoEnhancement?.autoMarkWatchedAfter115 !== false,
         autoMarkWatchedStars: (settings as any)?.videoEnhancement?.autoMarkWatchedStars ?? 4,
+        autoCleanupAfter115Download: (settings as any)?.drive115?.autoCleanupAfter115Download === true,
     };
 
     drive115PushSettingsCache = cache;
@@ -231,6 +233,7 @@ async function monitorAndOrganizeDrive115Download(params: {
     before: Drive115FileSnapshot;
     autoMarkWatched?: boolean;
     autoMarkWatchedStars?: number;
+    autoCleanupAfter115Download?: boolean;
     coverUrl?: string;
     previewUrls?: string[];
 }): Promise<void> {
@@ -476,6 +479,7 @@ async function scheduleDrive115OfflineOrganizer(params: {
     previewUrls?: string[];
     autoMarkWatched?: boolean;
     autoMarkWatchedStars?: number;
+    autoCleanupAfter115Download?: boolean;
 }): Promise<{ success: boolean; message?: string }> {
     if (typeof chrome === 'undefined' || !chrome.runtime?.id || typeof chrome.runtime.sendMessage !== 'function') {
         return { success: false, message: '后台整理服务不可用' };
@@ -495,6 +499,7 @@ async function scheduleDrive115OfflineOrganizer(params: {
                     previewUrls: params.previewUrls || [],
                     autoMarkWatched: params.autoMarkWatched,
                     autoMarkWatchedStars: params.autoMarkWatchedStars,
+                    autoCleanupAfter115Download: params.autoCleanupAfter115Download === true,
                 },
             }, (response) => {
                 const error = chrome.runtime?.lastError;
@@ -988,6 +993,7 @@ export async function handlePushToDrive115(
                     previewUrls: pageMediaAssets.previewUrls,
                     autoMarkWatched: cachedSettings.autoMarkWatchedAfter115,
                     autoMarkWatchedStars: cachedSettings.autoMarkWatchedStars,
+                    autoCleanupAfter115Download: cachedSettings.autoCleanupAfter115Download,
                 });
                 if (organizerJob.success) {
                     button.innerHTML = '后台整理中';
@@ -1005,6 +1011,7 @@ export async function handlePushToDrive115(
                         before: beforeFolderSnapshot,
                         autoMarkWatched: cachedSettings.autoMarkWatchedAfter115,
                         autoMarkWatchedStars: cachedSettings.autoMarkWatchedStars,
+                        autoCleanupAfter115Download: cachedSettings.autoCleanupAfter115Download,
                         coverUrl: pageMediaAssets.coverUrl,
                         previewUrls: pageMediaAssets.previewUrls,
                     }).catch((error) => {
