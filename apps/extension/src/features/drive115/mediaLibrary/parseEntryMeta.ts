@@ -268,17 +268,18 @@ export function parseCodeFromName(name: string): string {
 }
 
 /**
- * 条目番号优先级：文件夹名 > 视频文件名 > nfo 文件名。
+ * 条目番号优先级：当前视频文件名 > 文件夹名 > NFO 文件名。
+ * 一个目录可能包含多个番号时，优先使用当前视频文件名，避免整目录被误归到同一个番号。
  */
 export function resolveEntryCode(params: {
   folderName?: string;
   videoFileName?: string;
   nfoFileName?: string;
 }): { code: string; source: 'folder' | 'video' | 'nfo' | 'none' } {
-  const folderCode = parseCodeFromName(params.folderName || '');
-  if (folderCode) return { code: folderCode, source: 'folder' };
   const videoCode = parseCodeFromName(params.videoFileName || '');
   if (videoCode) return { code: videoCode, source: 'video' };
+  const folderCode = parseCodeFromName(params.folderName || '');
+  if (folderCode) return { code: folderCode, source: 'folder' };
   const nfoCode = parseCodeFromName(params.nfoFileName || '');
   if (nfoCode) return { code: nfoCode, source: 'nfo' };
   return { code: '', source: 'none' };
