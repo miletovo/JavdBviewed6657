@@ -26,6 +26,19 @@ describe('offlineOrganizerModel', () => {
     })).toBe(tasks[1]);
   });
 
+  it('scopes an exact hash match to the requested folder when folder metadata exists', () => {
+    const tasks = [
+      { info_hash: 'same-hash', wp_path_id: 'folder-other', name: 'SSIS-001', status: 2 },
+      { info_hash: 'same-hash', wp_path_id: 'folder-target', name: 'SSIS-001', status: 1 },
+    ];
+    expect(findDrive115OfflineTask(tasks, {
+      taskHash: 'same-hash',
+      folderId: 'folder-target',
+      videoId: 'SSIS-001',
+      magnetName: 'SSIS-001',
+    })).toBe(tasks[1]);
+  });
+
   it('does not match a same-name task in another target folder', () => {
     const tasks = [{ wp_path_id: 'other-folder', name: 'SSIS-001.torrent' }];
     expect(findDrive115OfflineTask(tasks, {
@@ -61,5 +74,9 @@ describe('offlineOrganizerModel', () => {
     expect(isDrive115TaskJunkFileName('movie.nfo')).toBe(false);
     expect(isDrive115TaskJunkFileName('subtitle.srt')).toBe(false);
     expect(isDrive115TaskJunkFileName('readme.txt')).toBe(false);
+    expect(isDrive115TaskJunkFileName('shortcut.url')).toBe(false);
+    expect(isDrive115TaskJunkFileName('details.html')).toBe(false);
+    expect(isDrive115TaskJunkFileName('checksum.md5')).toBe(false);
+    expect(isDrive115TaskJunkFileName('download.log')).toBe(false);
   });
 });
