@@ -799,7 +799,8 @@ export function Drive115SettingsPage() {
         prev.downloadDir === mapped.downloadDir &&
         prev.downloadDirName === mapped.downloadDirName &&
         prev.downloadDirPath === mapped.downloadDirPath &&
-        prev.skipManualPushDirectoryPicker === mapped.skipManualPushDirectoryPicker
+        prev.skipManualPushDirectoryPicker === mapped.skipManualPushDirectoryPicker &&
+        prev.autoCleanupAfter115Download === mapped.autoCleanupAfter115Download
       ) {
         return;
       }
@@ -1745,6 +1746,15 @@ export function Drive115SettingsPage() {
                   ? '开启后，手动推送会直接使用上方默认下载目录。关闭可恢复每次选择。'
                   : '请先选择一个非根目录的默认下载目录，才能跳过手动目录选择。'
               }
+            />
+
+            <Drive115LegacyToggle
+              id="drive115AutoCleanupAfter115Download"
+              label="下载完成后自动清理临时文件"
+              checked={form.autoCleanupAfter115Download}
+              disabled={disabled}
+              onChange={(next) => update('autoCleanupAfter115Download', next)}
+              description="默认关闭。开启后只清理本次离线任务新增的 .torrent、.pad 和系统临时文件；视频、封面、预览图、NFO、字幕、TXT 等资料不会删除。"
             />
 
             <div className="grid gap-2 sm:grid-cols-2">
