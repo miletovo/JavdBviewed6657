@@ -157,6 +157,46 @@ async function snapshotDrive115Folder(folderId: string): Promise<Drive115FileSna
     return { fileIds, folderIds };
 }
 
+function normalizePageImageUrl(value: string | null | undefined): string {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    try {
+        const url = new URL(raw, window.location.href);
+        return url.protocol === 'https:' || url.protocol === 'http:' ? url.toString() : '';
+    } catch {
+        return '';
+    }
+}
+
+function collectJavDbMediaAssets(): { coverUrl?: string; previewUrls: string[] } {
+    const poster = document.querySelector<HTMLImageElement>('.video-cover img, .movie-panel-info .cover img, .cover img');
+    const metaImage = document.querySelector<HTMLMetaElement>('meta[property="og:image"]')?.content;
+    const coverUrl = normalizePageImageUrl(
+        poster?.currentSrc || poster?.dataset.src || poster?.getAttribute('data-original') || poster?.src || metaImage,
+    );
+    const previews = Array.from(document.querySelectorAll<HTMLImageElement>(
+        '.preview-images img, .preview-image img, .video-preview img, .preview-images a[href]',
+    ))
+        .map((node) => {
+            const raw = node instanceof HTMLImageElement
+                ? (node.currentSrc || node.dataset.src || node.getAttribute('data-original') || node.src)
+                : (node as unknown as HTMLAnchorElement).href;
+            return normalizePageImageUrl(raw);
+        })
+        .filter((url) => Boolean(url) && url !== coverUrl);
+    return { coverUrl: coverUrl || undefined, previewUrls: Array.from(new Set(previews)).slice(0, 6) };
+}
+
+function getPageImageExtension(sourceUrl: string): string {
+    try {
+        const pathname = new URL(sourceUrl).pathname;
+        const extension = pathname.match(/\.(jpe?g|png|webp|gif|avif)$/i)?.[0];
+        return extension ? extension.toLowerCase() : '.jpg';
+    } catch {
+        return '.jpg';
+    }
+}
+
 async function monitorAndOrganizeDrive115Download(params: {
     videoId: string;
     folderId: string;
@@ -166,6 +206,9 @@ async function monitorAndOrganizeDrive115Download(params: {
     before: Drive115FileSnapshot;
     autoMarkWatched?: boolean;
     autoMarkWatchedStars?: number;
+    parentRootId: string;
+    coverUrl?: string;
+    previewUrls: string[];
 }): Promise<void> {
     const svc = getDrive115V2Service();
     const token = await svc.getValidAccessToken({ forceAutoRefresh: true });
@@ -264,12 +307,66 @@ async function monitorAndOrganizeDrive115Download(params: {
         }
     }
 
+    let uploadedImages = 0;
+    const imageAssets: Array<{ sourceUrl: string; fileName: string }> = [];
+    if (params.coverUrl) {
+        imageAssets.push({
+            sourceUrl: params.coverUrl,
+            fileName: params.videoId + '-poster' + getPageImageExtension(params.coverUrl),
+        });
+    }
+    for (let index = 0; index < params.previewUrls.length; index += 1) {
+        const sourceUrl = params.previewUrls[index];
+        imageAssets.push({
+            sourceUrl,
+            fileName: params.videoId + '-preview-' + String(index + 1).padStart(2, '0') + getPageImageExtension(sourceUrl),
+        });
+    }
+    if (imageAssets.length) {
+        const currentFolder = await svc.listFiles({
+            accessToken,
+            cid: params.folderId,
+            limit: 1150,
+            show_dir: 1,
+            stdir: 1,
+            cur: 1,
+        });
+        const existingNames = new Set(
+            (currentFolder.data || []).map((item) => getDrive115ItemName(item as Record<string, any>).toLocaleLowerCase()),
+        );
+        for (const asset of imageAssets) {
+            if (existingNames.has(asset.fileName.toLocaleLowerCase())) continue;
+            const uploaded = await svc.uploadRemoteImage({
+                accessToken,
+                parentId: params.folderId,
+                fileName: asset.fileName,
+                sourceUrl: asset.sourceUrl,
+            });
+            if (uploaded.success) {
+                uploadedImages += 1;
+                existingNames.add(asset.fileName.toLocaleLowerCase());
+            } else {
+                log('[Drive115] Image upload skipped/failed:', asset.fileName, uploaded.message || '');
+            }
+        }
+    }
+
+    try {
+        chrome.runtime.sendMessage({
+            type: 'DRIVE115_MEDIA_LIBRARY_INDEX',
+            rootCids: [params.parentRootId],
+            rescanDirectoryStructure: true,
+        }, () => void chrome.runtime.lastError);
+    } catch {
+        // The index can still be refreshed manually from the media-library settings page.
+    }
+
     if (params.button.isConnected) {
         params.button.innerHTML = '整理完成';
         params.button.className = 'button is-success is-small drive115-push-btn';
     }
     showToast(
-        params.videoId + ' 下载完成，已整理 ' + sorted.length + ' 个视频（移动 ' + moved + '，重命名 ' + renamed + '）',
+        params.videoId + ' 下载完成，已整理 ' + sorted.length + ' 个视频（移动 ' + moved + '，重命名 ' + renamed + '，上传图片 ' + uploadedImages + ' 张）',
         'success',
     );
     if (params.autoMarkWatched) {
@@ -672,6 +769,7 @@ export async function handlePushToDrive115(
             }
             const wpPathId = ensuredFolder.folderId;
             const beforeFolderSnapshot = await snapshotDrive115Folder(wpPathId);
+            const pageMediaAssets = collectJavDbMediaAssets();
 
             endStage('prepare', 'done', 'number folder ready: ' + wpPathId);
             await beginStage('push-api', `wpPathId=${wpPathId}`, 40);
@@ -709,6 +807,9 @@ export async function handlePushToDrive115(
                     before: beforeFolderSnapshot,
                     autoMarkWatched: cachedSettings.autoMarkWatchedAfter115,
                     autoMarkWatchedStars: cachedSettings.autoMarkWatchedStars,
+                    parentRootId: parentWpPathId,
+                    coverUrl: pageMediaAssets.coverUrl,
+                    previewUrls: pageMediaAssets.previewUrls,
                 }).catch((error) => {
                     log('[Drive115] Auto-organize monitor failed:', error);
                 });
