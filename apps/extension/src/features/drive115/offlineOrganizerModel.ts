@@ -91,7 +91,7 @@ export function buildDrive115OrganizedVideoNames(
     const extension = file.name.match(/\.[^.]+$/)?.[0] || '';
     let nextName = sorted.length === 1 ? safeCode + extension : safeCode + '-' + String(index + 1).padStart(2, '0') + extension;
     if (reserved.has(nextName.toLowerCase())) {
-      let suffix = 1;
+      let suffix = 0;
       do {
         suffix += 1;
         nextName = safeCode + '-' + String(suffix).padStart(2, '0') + extension;
