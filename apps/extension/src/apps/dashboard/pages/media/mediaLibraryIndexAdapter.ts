@@ -494,9 +494,20 @@ export function mergeBrowseCatalogs(
       userData,
       watchState: userData ? computeWatchState(userData) : existing.watchState,
     };
-    if (!next.pickCode && item.source === '115') {
-      next.pickCode = item.pickCode;
-      next.fileName = item.fileName || next.fileName;
+    if (item.source === '115') {
+      // 同番号可能来自多个 115 文件夹/版本：保留全部物理副本，并用后续条目补齐
+      // 首条记录缺失的展示元数据，避免一个无封面的文件遮蔽同番号的有效封面/NFO。
+      if (!next.pickCode) {
+        next.pickCode = item.pickCode;
+        next.fileName = item.fileName || next.fileName;
+      }
+      if (!next.coverPickCode) next.coverPickCode = item.coverPickCode;
+      if (!next.libraryKey) next.libraryKey = item.libraryKey;
+      if (!next.nfoSummary) next.nfoSummary = item.nfoSummary;
+      if (!next.year) next.year = item.year;
+      if ((!next.title || next.title === next.code) && item.title && item.title !== item.code) {
+        next.title = item.title;
+      }
     }
     byCode.set(mapKey, next);
   }
