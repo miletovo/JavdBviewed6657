@@ -231,6 +231,8 @@ async function monitorAndOrganizeDrive115Download(params: {
     before: Drive115FileSnapshot;
     autoMarkWatched?: boolean;
     autoMarkWatchedStars?: number;
+    coverUrl?: string;
+    previewUrls?: string[];
 }): Promise<void> {
     const svc = getDrive115V2Service();
     const deadline = Date.now() + 24 * 60 * 60 * 1000;
@@ -341,13 +343,21 @@ async function monitorAndOrganizeDrive115Download(params: {
         else failedOperations += batch.length;
     }
 
+    const imageResult = await uploadJavDbMediaAssetsTo115({
+        svc,
+        accessToken: token.accessToken,
+        folderId: params.folderId,
+        coverUrl: params.coverUrl,
+        previewUrls: params.previewUrls,
+    });
+    failedOperations += imageResult.failed;
     if (params.button.isConnected) {
         params.button.innerHTML = failedOperations ? '整理部分完成' : '整理完成';
         params.button.className = 'button is-success is-small drive115-push-btn';
     }
     showToast(
-        params.videoId + ' 下载完成：视频 ' + videos.length + ' 个，移动 ' + moved
-        + '，重命名 ' + renamed + '，清理杂项 ' + deleted
+        params.videoId + ' 下载完成：视频 ' + videos.length + ' 个，图片 ' + imageResult.uploaded
+        + ' 张，移动 ' + moved + '，重命名 ' + renamed + '，清理杂项 ' + deleted
         + (failedOperations ? '；另有 ' + failedOperations + ' 项操作未成功' : ''),
         failedOperations ? 'info' : 'success',
     );
@@ -360,9 +370,196 @@ async function monitorAndOrganizeDrive115Download(params: {
     }
 }
 
+
+type JavDbMediaAssets = { coverUrl?: string; previewUrls: string[] };
+
+function resolveJavDbImageUrl(element: HTMLImageElement | HTMLAnchorElement | null): string | undefined {
+    if (!element) return undefined;
+    const raw = element instanceof HTMLAnchorElement
+        ? (element.getAttribute('href') || element.href)
+        : (element.getAttribute('data-src')
+            || element.getAttribute('data-original')
+            || element.getAttribute('data-lazy')
+            || element.currentSrc
+            || element.src);
+    if (!raw || /^data:/i.test(raw)) return undefined;
+    try {
+        const url = new URL(raw, window.location.href);
+        if (url.protocol !== 'https:' && url.protocol !== 'http:') return undefined;
+        return url.href;
+    } catch {
+        return undefined;
+    }
+}
+
+function collectJavDbMediaAssets(): JavDbMediaAssets {
+    const coverImage = document.querySelector<HTMLImageElement>('.column-video-cover img.video-cover');
+    const coverAnchor = coverImage?.closest<HTMLAnchorElement>('a[href]')
+        || document.querySelector<HTMLAnchorElement>('.column-video-cover a[data-fancybox="gallery"]');
+    const coverUrl = resolveJavDbImageUrl(coverAnchor) || resolveJavDbImageUrl(coverImage);
+
+    const previewUrls: string[] = [];
+    const seen = new Set<string>(coverUrl ? [coverUrl] : []);
+    const selectors = [
+        '#video-images img',
+        '.video-images img',
+        '.preview-images img',
+        '.video-preview-images img',
+        '.sample-images img',
+        '.video-samples img',
+        '.preview-list img',
+        '.tile-images img',
+        'a[data-fancybox="gallery"]',
+    ];
+    for (const selector of selectors) {
+        const elements = Array.from(document.querySelectorAll<HTMLImageElement | HTMLAnchorElement>(selector));
+        for (const element of elements) {
+            if (element.closest('.column-video-cover')) continue;
+            const url = resolveJavDbImageUrl(element);
+            if (!url || seen.has(url)) continue;
+            seen.add(url);
+            previewUrls.push(url);
+            if (previewUrls.length >= 8) return { coverUrl, previewUrls };
+        }
+    }
+    return { coverUrl, previewUrls };
+}
+
+function getJavDbImageExtension(sourceUrl: string): string {
+    try {
+        const ext = new URL(sourceUrl).pathname.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+        if (ext === 'jpeg') return 'jpg';
+        if (ext && ['jpg', 'png', 'webp', 'gif'].includes(ext)) return ext;
+    } catch {}
+    return 'jpg';
+}
+
+async function uploadJavDbMediaAssetsTo115(params: {
+    svc: ReturnType<typeof getDrive115V2Service>;
+    accessToken: string;
+    folderId: string;
+    coverUrl?: string;
+    previewUrls?: string[];
+}): Promise<{ uploaded: number; failed: number }> {
+    const assets: Array<{ sourceUrl: string; fileName: string }> = [];
+    if (params.coverUrl) {
+        assets.push({ sourceUrl: params.coverUrl, fileName: 'cover.' + getJavDbImageExtension(params.coverUrl) });
+    }
+    (params.previewUrls || []).slice(0, 8).forEach((sourceUrl, index) => {
+        assets.push({
+            sourceUrl,
+            fileName: 'preview-' + String(index + 1).padStart(2, '0') + '.' + getJavDbImageExtension(sourceUrl),
+        });
+    });
+    let uploaded = 0;
+    let failed = 0;
+    for (const asset of assets) {
+        const result = await params.svc.uploadRemoteImage({
+            accessToken: params.accessToken,
+            parentId: params.folderId,
+            fileName: asset.fileName,
+            sourceUrl: asset.sourceUrl,
+        });
+        if (result.success) uploaded += 1;
+        else failed += 1;
+    }
+    return { uploaded, failed };
+}
+
+async function scheduleDrive115OfflineOrganizer(params: {
+    videoId: string;
+    folderId: string;
+    taskHash?: string;
+    magnetName: string;
+    before: Drive115FileSnapshot;
+    coverUrl?: string;
+    previewUrls?: string[];
+    autoMarkWatched?: boolean;
+    autoMarkWatchedStars?: number;
+}): Promise<{ success: boolean; message?: string }> {
+    if (typeof chrome === 'undefined' || !chrome.runtime?.id || typeof chrome.runtime.sendMessage !== 'function') {
+        return { success: false, message: '后台整理服务不可用' };
+    }
+    return new Promise((resolve) => {
+        try {
+            chrome.runtime.sendMessage({
+                type: 'drive115.offline-organizer.schedule',
+                payload: {
+                    videoId: params.videoId,
+                    folderId: params.folderId,
+                    taskHash: params.taskHash,
+                    magnetName: params.magnetName,
+                    beforeFileIds: [...params.before.fileIds],
+                    beforeRootFileNames: [...params.before.rootFileNames],
+                    coverUrl: params.coverUrl,
+                    previewUrls: params.previewUrls || [],
+                    autoMarkWatched: params.autoMarkWatched,
+                    autoMarkWatchedStars: params.autoMarkWatchedStars,
+                },
+            }, (response) => {
+                const error = chrome.runtime?.lastError;
+                if (error) {
+                    resolve({ success: false, message: error.message || '后台整理服务无响应' });
+                    return;
+                }
+                resolve(response && response.success
+                    ? { success: true }
+                    : { success: false, message: response?.message || '后台整理任务注册失败' });
+            });
+        } catch (error) {
+            resolve({ success: false, message: error instanceof Error ? error.message : String(error) });
+        }
+    });
+}
+
+let offlineOrganizerCompletionListenerAttached = false;
+
+function attachDrive115OfflineOrganizerCompletionListener(): void {
+    if (offlineOrganizerCompletionListenerAttached) return;
+    if (typeof chrome === 'undefined' || !chrome.runtime?.onMessage) return;
+    offlineOrganizerCompletionListenerAttached = true;
+    chrome.runtime.onMessage.addListener((message) => {
+        if (message?.type !== 'drive115.offline-organizer.completed') return false;
+        const payload = message.payload || {};
+        const videoId = String(payload.videoId || '').trim();
+        const status = String(payload.status || '');
+        const button = Array.from(document.querySelectorAll<HTMLButtonElement>('.drive115-push-btn'))
+            .find((candidate) => candidate.dataset.drive115VideoId === videoId);
+        if (button) {
+            button.disabled = false;
+            button.innerHTML = status === 'completed' ? '整理完成'
+                : status === 'partial' ? '整理部分完成' : '下载失败';
+            button.className = status === 'failed'
+                ? 'button is-danger is-small drive115-push-btn'
+                : 'button is-success is-small drive115-push-btn';
+        }
+        const result = payload.result || {};
+        if (status === 'completed' || status === 'partial') {
+            showToast(
+                videoId + ' 下载完成：视频 ' + (Number(result.videoCount) || 0)
+                + ' 个，图片 ' + (Number(result.imagesUploaded) || 0)
+                + ' 张，移动 ' + (Number(result.moved) || 0)
+                + '，重命名 ' + (Number(result.renamed) || 0)
+                + '，清理杂项 ' + (Number(result.deleted) || 0)
+                + (status === 'partial' ? '；部分操作未成功，请检查 115 文件夹' : ''),
+                status === 'partial' ? 'info' : 'success',
+            );
+            if (payload.autoMarkWatched) {
+                void markVideoAsWatched(videoId, Number(payload.autoMarkWatchedStars) || 4).catch((error) => {
+                    showToast('影片已整理，但自动标记已看失败：' + (error instanceof Error ? error.message : String(error)), 'info');
+                });
+            }
+        } else {
+            showToast(videoId + ' 的 115 自动整理失败：' + String(payload.message || '请检查 115 任务列表'), 'error');
+        }
+        return false;
+    });
+}
+
 async function inject115ButtonsIntoNativeMagnetList(): Promise<void> {
     const container = await waitForElement('#magnets-content', 1500, 120);
     if (!container) return;
+    attachDrive115OfflineOrganizerCompletionListener();
     const videoId = extractVideoIdFromPage() || 'unknown';
 
     const items = Array.from(container.querySelectorAll('.item')) as HTMLElement[];
@@ -545,6 +742,7 @@ export async function handlePushToDrive115(
         return rootTask;
     };
     const originalText = button.innerHTML;
+    button.dataset.drive115VideoId = videoId;
     log(`[Drive115] handlePushToDrive115 start: ${videoId} | ${magnetName} | ${pageContext.pageInstanceId}`);
     const stageStartTimes = new Map<string, number>();
     const beginStage = async (stage: string, detail: string, progressPct: number) => {
