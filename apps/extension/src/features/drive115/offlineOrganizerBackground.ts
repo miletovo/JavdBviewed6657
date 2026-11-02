@@ -263,7 +263,7 @@ async function collectNewFiles(
 
 function imageExtensionFromUrl(sourceUrl: string): string {
   try {
-    const ext = new URL(sourceUrl).pathname.match(/\\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+    const ext = new URL(sourceUrl).pathname.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
     if (ext === 'jpeg') return 'jpg';
     if (ext && ['jpg', 'png', 'webp', 'gif'].includes(ext)) return ext;
   } catch {}
@@ -287,7 +287,7 @@ async function uploadJavDbImagesTo115(
   if (!assets.length) return { imagesUploaded: 0, imageFailures: 0 };
 
   const settings = await getSettings();
-  const baseUrl = String((settings as any)?.drive115?.v2ApiBaseUrl || 'https://proapi.115.com').replace(/\\/+$/, '');
+  const baseUrl = String((settings as any)?.drive115?.v2ApiBaseUrl || 'https://proapi.115.com').replace(/\/+$/, '');
   let imagesUploaded = 0;
   let imageFailures = 0;
   for (const asset of assets) {
