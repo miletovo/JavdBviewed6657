@@ -1634,6 +1634,198 @@ class Drive115V2Service {
     return { success: false, message: lastMsg };
   }
 
+  private async manageFileOperation(params: {
+    accessToken: string;
+    action: 'create_folder' | 'rename_file' | 'move_files';
+    parentId?: string | number;
+    fileId?: string;
+    fileName?: string;
+    fileIds?: string[];
+    targetFolderId?: string | number;
+  }): Promise<{ success: boolean; message?: string; data?: any; raw?: any }> {
+    const token = String(params.accessToken || '').trim();
+    if (!token) return { success: false, message: '缺少 access_token' };
+    const base = await this.getBaseURL();
+    const payload = {
+      accessToken: token,
+      baseUrl: base,
+      action: params.action,
+      parentId: params.parentId ?? '0',
+      fileId: params.fileId,
+      fileName: params.fileName,
+      fileIds: params.fileIds,
+      targetFolderId: params.targetFolderId,
+    };
+
+    try {
+      if (typeof chrome !== 'undefined' && chrome.runtime?.id && typeof chrome.runtime.sendMessage === 'function') {
+        const bgResp: any = await new Promise((resolve) => {
+          try {
+            chrome.runtime.sendMessage(
+              { type: 'drive115.manage_files_v2', payload },
+              (resp) => {
+                const err = chrome.runtime?.lastError;
+                resolve(err ? undefined : resp);
+              },
+            );
+          } catch {
+            resolve(undefined);
+          }
+        });
+        if (bgResp && typeof bgResp.success === 'boolean') {
+          return {
+            success: Boolean(bgResp.success),
+            message: bgResp.message,
+            data: bgResp.data,
+            raw: bgResp.raw,
+          };
+        }
+      }
+    } catch {
+      // fall through to direct fetch
+    }
+
+    const endpoint = params.action === 'create_folder'
+      ? '/open/folder/add'
+      : params.action === 'rename_file'
+        ? '/open/ufile/update'
+        : '/open/ufile/move';
+    const form = new FormData();
+    if (params.action === 'create_folder') {
+      form.set('pid', String(params.parentId ?? '0'));
+      form.set('file_name', String(params.fileName || '').trim());
+    } else if (params.action === 'rename_file') {
+      form.set('file_id', String(params.fileId || '').trim());
+      form.set('file_name', String(params.fileName || '').trim());
+    } else {
+      form.set('file_ids', (params.fileIds || []).join(','));
+      form.set('to_cid', String(params.targetFolderId ?? '0'));
+    }
+
+    try {
+      const response = await nativeFetch(base + endpoint, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' },
+        body: form,
+      });
+      const raw: any = await response.json().catch(() => ({}));
+      const success = (typeof raw.state === 'boolean' ? raw.state : response.ok) && response.ok;
+      return {
+        success: Boolean(success),
+        message: success ? undefined : (describe115Error(raw) || raw.message || raw.error || '文件管理操作失败'),
+        data: raw.data,
+        raw,
+      };
+    } catch (error: any) {
+      return { success: false, message: friendlyRequestError(error) || error?.message || '文件管理请求失败' };
+    }
+  }
+
+  async createFolder(params: {
+    accessToken: string;
+    parentId?: string | number;
+    folderName: string;
+  }): Promise<{ success: boolean; folderId?: string; folderName?: string; message?: string; raw?: any }> {
+    const folderName = String(params.folderName || '').replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 200);
+    if (!folderName) return { success: false, message: '文件夹名称为空' };
+    const result = await this.manageFileOperation({
+      accessToken: params.accessToken,
+      action: 'create_folder',
+      parentId: params.parentId ?? '0',
+      fileName: folderName,
+    });
+    const data = result.data || result.raw?.data || {};
+    const folderId = String(data.file_id ?? data.cid ?? data.fid ?? result.raw?.file_id ?? '').trim();
+    return {
+      success: result.success && Boolean(folderId),
+      folderId: folderId || undefined,
+      folderName: String(data.file_name || folderName),
+      message: result.success && !folderId ? '115 已返回成功，但没有返回新文件夹 ID' : result.message,
+      raw: result.raw,
+    };
+  }
+
+  async renameFile(params: {
+    accessToken: string;
+    fileId: string;
+    fileName: string;
+  }): Promise<{ success: boolean; message?: string; raw?: any }> {
+    const fileId = String(params.fileId || '').trim();
+    const fileName = String(params.fileName || '').trim();
+    if (!fileId || !fileName) return { success: false, message: '缺少文件 ID 或新文件名' };
+    return this.manageFileOperation({
+      accessToken: params.accessToken,
+      action: 'rename_file',
+      fileId,
+      fileName: fileName.slice(0, 255),
+    });
+  }
+
+  async moveFiles(params: {
+    accessToken: string;
+    fileIds: string[];
+    targetFolderId: string | number;
+  }): Promise<{ success: boolean; message?: string; raw?: any }> {
+    const fileIds = (params.fileIds || []).map((id) => String(id || '').trim()).filter(Boolean);
+    if (!fileIds.length) return { success: false, message: '缺少文件 ID' };
+    return this.manageFileOperation({
+      accessToken: params.accessToken,
+      action: 'move_files',
+      fileIds,
+      targetFolderId: params.targetFolderId,
+    });
+  }
+
+  async ensureFolder(params: {
+    accessToken: string;
+    parentId?: string | number;
+    folderName: string;
+  }): Promise<{ success: boolean; folderId?: string; folderName?: string; created?: boolean; message?: string }> {
+    const parentId = String(params.parentId ?? '0').trim() || '0';
+    const folderName = String(params.folderName || '').replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 200);
+    if (!folderName) return { success: false, message: '文件夹名称为空' };
+
+    const findExisting = async () => {
+      const listed = await this.listFiles({
+        accessToken: params.accessToken,
+        cid: parentId,
+        limit: 1150,
+        show_dir: 1,
+        stdir: 1,
+        cur: 1,
+      });
+      if (!listed.success) return { error: listed.message };
+      const match = (listed.data || []).find((item) => {
+        const kind = String(item.fc ?? (item as any).file_category ?? '');
+        const name = String(item.file_name || item.fn || '').trim();
+        return kind === '0' && name.toLocaleLowerCase() === folderName.toLocaleLowerCase();
+      });
+      if (!match) return {};
+      const id = String(match.cid ?? match.file_id ?? match.fid ?? '').trim();
+      return id ? { folderId: id } : { error: '找到同名文件夹，但未能读取文件夹 ID' };
+    };
+
+    const existing = await findExisting();
+    if (existing.folderId) return { success: true, folderId: existing.folderId, folderName, created: false };
+    if (existing.error) return { success: false, message: existing.error };
+
+    const created = await this.createFolder({
+      accessToken: params.accessToken,
+      parentId,
+      folderName,
+    });
+    if (created.success && created.folderId) {
+      return { success: true, folderId: created.folderId, folderName, created: true };
+    }
+
+    // 创建与扫描并发时可能发生同名冲突；重新读取一次，复用已经出现的目录。
+    const afterCreate = await findExisting();
+    if (afterCreate.folderId) {
+      return { success: true, folderId: afterCreate.folderId, folderName, created: false };
+    }
+    return { success: false, message: created.message || afterCreate.error || '创建番号文件夹失败' };
+  }
+
   /**
    * 获取视频播放地址（尝试 open API）
    * 常见：/open/video/play?pick_code=
