@@ -83,10 +83,12 @@ async function loadJobs(): Promise<OfflineOrganizerJob[]> {
 
 async function saveJobs(jobs: OfflineOrganizerJob[]): Promise<void> {
   const now = Date.now();
-  const retained = jobs.filter((job) => (
-    job.status === 'pending' || now - job.updatedAt <= JOB_HISTORY_TTL_MS
+  // 待处理任务不能因为历史记录太多而被 slice(-100) 丢弃。
+  const pending = jobs.filter((job) => job.status === 'pending');
+  const history = jobs.filter((job) => (
+    job.status !== 'pending' && now - job.updatedAt <= JOB_HISTORY_TTL_MS
   )).slice(-100);
-  await setValue(STORAGE_KEYS.DRIVE115_OFFLINE_ORGANIZER_JOBS, retained);
+  await setValue(STORAGE_KEYS.DRIVE115_OFFLINE_ORGANIZER_JOBS, [...pending, ...history]);
 }
 
 function scheduleNextPoll(): void {
@@ -286,20 +288,29 @@ async function uploadJavDbImagesTo115(
   });
   if (!assets.length) return { imagesUploaded: 0, imageFailures: 0 };
 
-  const settings = await getSettings();
-  const baseUrl = String((settings as any)?.drive115?.v2ApiBaseUrl || 'https://proapi.115.com').replace(/\/+$/, '');
+  let baseUrl = 'https://proapi.115.com';
+  try {
+    const settings = await getSettings();
+    baseUrl = String((settings as any)?.drive115?.v2ApiBaseUrl || baseUrl).replace(/\/+$/, '');
+  } catch {
+    // 设置读取失败时使用官方默认 API 域名，不能因此中断已经完成的视频整理。
+  }
   let imagesUploaded = 0;
   let imageFailures = 0;
   for (const asset of assets) {
     let result: { success: boolean; message?: string } = { success: false };
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      result = await uploadRemoteImageTo115({
-        accessToken,
-        parentId: job.folderId,
-        fileName: asset.fileName,
-        sourceUrl: asset.sourceUrl,
-        baseUrl,
-      });
+      try {
+        result = await uploadRemoteImageTo115({
+          accessToken,
+          parentId: job.folderId,
+          fileName: asset.fileName,
+          sourceUrl: asset.sourceUrl,
+          baseUrl,
+        });
+      } catch (error) {
+        result = { success: false, message: error instanceof Error ? error.message : String(error) };
+      }
       if (result.success) break;
       if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 1500));
     }
@@ -322,7 +333,8 @@ async function organizeCompletedJob(
   );
   const videos = collected.filter((file) => isDrive115VideoFileName(file.name));
   if (!videos.length) {
-    return { videoCount: 0, imagesUploaded: 0, imageFailures: 0, moved: 0, renamed: 0, deleted: 0, failedOperations: 0 };
+    // 115 的任务状态可能先变成完成、文件列表稍后才可见；保留任务到下一轮闹钟重试。
+    throw new Error('115 离线任务已完成，但新增视频尚未出现在目录列表中，稍后将自动重试扫描');
   }
 
   const arranged = buildDrive115OrganizedVideoNames(
@@ -335,22 +347,30 @@ async function organizeCompletedJob(
   let failedOperations = 0;
   for (const file of arranged) {
     if (file.parentId !== job.folderId) {
-      const move = await svc.moveFiles({
-        accessToken,
-        fileIds: [file.id],
-        targetFolderId: job.folderId,
-      });
-      if (move.success) moved += 1;
-      else failedOperations += 1;
+      try {
+        const move = await svc.moveFiles({
+          accessToken,
+          fileIds: [file.id],
+          targetFolderId: job.folderId,
+        });
+        if (move.success) moved += 1;
+        else failedOperations += 1;
+      } catch {
+        failedOperations += 1;
+      }
     }
     if (file.name !== file.nextName) {
-      const rename = await svc.renameFile({
-        accessToken,
-        fileId: file.id,
-        fileName: file.nextName,
-      });
-      if (rename.success) renamed += 1;
-      else failedOperations += 1;
+      try {
+        const rename = await svc.renameFile({
+          accessToken,
+          fileId: file.id,
+          fileName: file.nextName,
+        });
+        if (rename.success) renamed += 1;
+        else failedOperations += 1;
+      } catch {
+        failedOperations += 1;
+      }
     }
   }
 
@@ -361,9 +381,13 @@ async function organizeCompletedJob(
   let deleted = 0;
   for (let index = 0; index < junkFiles.length; index += 50) {
     const batch = junkFiles.slice(index, index + 50);
-    const remove = await svc.deleteFiles({ accessToken, fileIds: batch.map((file) => file.id) });
-    if (remove.success) deleted += batch.length;
-    else failedOperations += batch.length;
+    try {
+      const remove = await svc.deleteFiles({ accessToken, fileIds: batch.map((file) => file.id) });
+      if (remove.success) deleted += batch.length;
+      else failedOperations += batch.length;
+    } catch {
+      failedOperations += batch.length;
+    }
   }
 
   const imageResult = await uploadJavDbImagesTo115(job, accessToken);
@@ -426,18 +450,32 @@ export async function handleDrive115OfflineOrganizerAlarm(alarmName: string): Pr
         job.updatedAt = now;
         continue;
       }
-      const taskList = await svc.getTaskList({ accessToken: token.accessToken, page: 1 });
-      if (!taskList.success) {
-        job.lastError = taskList.message || '读取 115 离线任务失败';
+      const firstPage = await svc.getTaskList({ accessToken: token.accessToken, page: 1 });
+      if (!firstPage.success) {
+        job.lastError = firstPage.message || '读取 115 离线任务失败';
         job.updatedAt = now;
         continue;
       }
-      const task = findDrive115OfflineTask(taskList.data?.tasks || [], {
-        taskHash: job.taskHash,
-        folderId: job.folderId,
-        videoId: job.videoId,
-        magnetName: job.magnetName,
-      });
+      const findTask = (tasks: readonly unknown[]) => findDrive115OfflineTask(
+        tasks as Array<{ info_hash?: unknown; hash?: unknown; name?: unknown; wp_path_id?: unknown; status?: unknown }>,
+        {
+          taskHash: job.taskHash,
+          folderId: job.folderId,
+          videoId: job.videoId,
+          magnetName: job.magnetName,
+        },
+      );
+      let task = findTask(firstPage.data?.tasks || []);
+      // 通常最新任务在第一页；若用户任务很多，最多继续检查前 5 页，避免每分钟无限请求。
+      const pageCount = Math.min(5, Math.max(1, Number(firstPage.data?.page_count) || 1));
+      for (let page = 2; !task && page <= pageCount; page += 1) {
+        const nextPage = await svc.getTaskList({ accessToken: token.accessToken, page });
+        if (!nextPage.success) {
+          job.lastError = nextPage.message || '读取 115 离线任务分页失败';
+          break;
+        }
+        task = findTask(nextPage.data?.tasks || []);
+      }
       if (!task) {
         job.updatedAt = now;
         continue;
