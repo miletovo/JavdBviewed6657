@@ -978,21 +978,39 @@ export async function handlePushToDrive115(
                 const taskHash = Array.isArray(res.data)
                     ? String(res.data.find((entry: any) => entry?.info_hash)?.info_hash || '')
                     : '';
-                void monitorAndOrganizeDrive115Download({
+                const organizerJob = await scheduleDrive115OfflineOrganizer({
                     videoId,
                     folderId: wpPathId,
                     taskHash: taskHash || undefined,
                     magnetName,
-                    button,
                     before: beforeFolderSnapshot,
-                    autoMarkWatched: cachedSettings.autoMarkWatchedAfter115,
-                    autoMarkWatchedStars: cachedSettings.autoMarkWatchedStars,
-                    parentRootId: parentWpPathId,
                     coverUrl: pageMediaAssets.coverUrl,
                     previewUrls: pageMediaAssets.previewUrls,
-                }).catch((error) => {
-                    log('[Drive115] Auto-organize monitor failed:', error);
+                    autoMarkWatched: cachedSettings.autoMarkWatchedAfter115,
+                    autoMarkWatchedStars: cachedSettings.autoMarkWatchedStars,
                 });
+                if (organizerJob.success) {
+                    button.innerHTML = '后台整理中';
+                    button.className = 'button is-info is-small drive115-push-btn';
+                    showToast(videoId + ' 已提交到 115，后台将自动监控下载、整理文件并保存封面/预览图', 'info');
+                } else {
+                    // 后台服务未能接管时，保留当前页面监控作为兼容兜底。
+                    showToast('后台整理服务未能启动，将由当前页面继续监控：' + (organizerJob.message || '未知原因'), 'info');
+                    void monitorAndOrganizeDrive115Download({
+                        videoId,
+                        folderId: wpPathId,
+                        taskHash: taskHash || undefined,
+                        magnetName,
+                        button,
+                        before: beforeFolderSnapshot,
+                        autoMarkWatched: cachedSettings.autoMarkWatchedAfter115,
+                        autoMarkWatchedStars: cachedSettings.autoMarkWatchedStars,
+                        coverUrl: pageMediaAssets.coverUrl,
+                        previewUrls: pageMediaAssets.previewUrls,
+                    }).catch((error) => {
+                        log('[Drive115] Auto-organize monitor failed:', error);
+                    });
+                }
                 endStage('push-api', 'done', `returned=${Array.isArray(res.data) ? res.data.length : 0}; folder=${wpPathId}`);
                 const returned = Array.isArray(res.data) ? res.data.length : 0;
                 await addLogV2({ timestamp: Date.now(), level: 'info', message: `内容脚本：推送成功，返回 ${returned} 项，videoId=${videoId}` });
