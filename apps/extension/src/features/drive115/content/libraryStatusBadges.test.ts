@@ -96,6 +96,18 @@ function attachContainer(videoId: string): HTMLDivElement {
   return container;
 }
 
+
+function attachCardContainer(videoId: string): HTMLDivElement {
+  const card = document.createElement('div');
+  card.className = 'item';
+  card.innerHTML = '<div class="box"><div class="cover"><img alt=""></div></div>';
+  const container = document.createElement('div');
+  container.dataset.videoId = videoId;
+  card.appendChild(container);
+  document.body.appendChild(card);
+  return container;
+}
+
 const enabledSettings: Record<string, unknown> = {
   libraryMatchStatus: { enabled: true, sources: { drive115: true } },
 };
@@ -147,6 +159,54 @@ describe('115 library status badges', () => {
     expect(loadDrive115LibraryStateMock).toHaveBeenCalledTimes(1);
     expect(containers[0].querySelector('.drive115-library-status-tag')?.textContent).toBe('115 已有');
     expect(containers[1].querySelector('.drive115-library-status-tag')).toBeNull();
+  });
+
+
+  it('renders a direct 115 play button on the matching poster', async () => {
+    const badges = await loadFreshBadgesModule();
+    const container = attachCardContainer('SSIS-001');
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+
+    await badges.renderDrive115LibraryStatusBadge(container, 'SSIS-001', enabledSettings);
+
+    const button = container.closest('.item')?.querySelector<HTMLButtonElement>('.drive115-library-play-button');
+    expect(button).not.toBeNull();
+    button?.click();
+    expect(open).toHaveBeenCalledWith(
+      'https://115vod.com/?pickcode=p-SSIS-001&share_id=0',
+      '_blank',
+      'noopener,noreferrer',
+    );
+    expect(container.querySelector('.drive115-library-status-tag')?.textContent).toBe('115 已有');
+  });
+
+  it('offers a file picker when one JavDB code matches multiple local videos', async () => {
+    const badges = await loadFreshBadgesModule();
+    fakeLibrary.setEntries([
+      {
+        key: 'SSIS-001:a', code: 'SSIS-001', title: 'SSIS-001', folderCid: 'f', folderName: 'SSIS-001',
+        rootCid: 'root', videoFileId: 'a', pickCode: 'pick-a', fileName: 'SSIS-001.mp4', fileSize: 900, updatedAt: 1,
+      },
+      {
+        key: 'SSIS-001:b', code: 'SSIS-001', title: 'SSIS-001', folderCid: 'f', folderName: 'SSIS-001',
+        rootCid: 'root', videoFileId: 'b', pickCode: 'pick-b', fileName: 'SSIS-001.mkv', fileSize: 700, updatedAt: 1,
+      },
+    ]);
+    const container = attachCardContainer('SSIS-001');
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+
+    await badges.renderDrive115LibraryStatusBadge(container, 'SSIS-001', enabledSettings);
+
+    const trigger = container.closest('.item')?.querySelector<HTMLButtonElement>('.drive115-library-play-button');
+    trigger?.click();
+    const options = container.closest('.item')?.querySelectorAll<HTMLButtonElement>('.drive115-library-play-option');
+    expect(options).toHaveLength(2);
+    options?.[1]?.click();
+    expect(open).toHaveBeenCalledWith(
+      'https://115vod.com/?pickcode=pick-b&share_id=0',
+      '_blank',
+      'noopener,noreferrer',
+    );
   });
 
   it('storage 变化后失效缓存并刷新已渲染卡片的角标', async () => {
