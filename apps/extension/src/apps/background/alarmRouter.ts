@@ -42,6 +42,11 @@ import {
   setupCloudAutoSyncAlarm,
 } from '../../features/cloudSync/backgroundCloudSync';
 import { initJavdbSessionCookieWatcher } from '../../features/cloudSync/javdbSessionVault';
+import {
+  DRIVE115_OFFLINE_ORGANIZER_ALARM,
+  ensureDrive115OfflineOrganizerAlarm,
+  handleDrive115OfflineOrganizerAlarm,
+} from '../../features/drive115/offlineOrganizerBackground';
 
 // re-export for message handlers / tests
 export { ALARM_DIAGNOSTICS_STORAGE_KEY, readAlarmDiagnostics, recordAlarmFire };
@@ -53,6 +58,7 @@ export function initializeBackgroundAlarmWiring(): void {
   syncInsightsMonthlyAlarmFromSettings();
   syncEmbyLibrarySyncAlarmFromCurrentSettings().catch(() => {});
   ensureDrive115MediaLibraryResumeAlarm().catch(() => {});
+  ensureDrive115OfflineOrganizerAlarm().catch(() => {});
   registerNewWorksStartupInitializer();
   registerRecycleBinCleanupAlarm();
   registerBackgroundAlarmRouter();
@@ -109,6 +115,7 @@ export function registerNewWorksStartupInitializer(): void {
     chrome.runtime.onStartup.addListener(async () => {
       try {
         await ensureDrive115MediaLibraryResumeAlarm();
+        await ensureDrive115OfflineOrganizerAlarm();
         await newWorksScheduler.initialize();
         try {
           const settings = await getSettings();
@@ -145,6 +152,15 @@ export function registerBackgroundAlarmRouter(): void {
           name,
           () => handleDrive115MediaLibraryResumeAlarm(name),
           () => 'drive115-library-index-resume',
+        ).catch(() => {});
+        return;
+      }
+
+      if (name === DRIVE115_OFFLINE_ORGANIZER_ALARM) {
+        void withAlarmDiagnostics(
+          name,
+          () => handleDrive115OfflineOrganizerAlarm(name),
+          () => 'drive115-offline-organizer',
         ).catch(() => {});
         return;
       }

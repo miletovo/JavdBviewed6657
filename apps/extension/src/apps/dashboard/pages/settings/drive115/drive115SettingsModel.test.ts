@@ -35,6 +35,7 @@ describe('drive115SettingsModel', () => {
     expect(DEFAULT_DRIVE115_SETTINGS_FORM.v2MinRefreshIntervalMin).toBe(60);
     expect(DEFAULT_DRIVE115_SETTINGS_FORM.verifyCount).toBe(5);
     expect(DEFAULT_DRIVE115_SETTINGS_FORM.maxFailures).toBe(5);
+    expect(DEFAULT_DRIVE115_SETTINGS_FORM.autoCleanupAfter115Download).toBe(false);
     expect(DEFAULT_DRIVE115_SETTINGS_FORM.mediaLibraryScanDepth).toBe(2);
   });
 
@@ -88,6 +89,7 @@ describe('drive115SettingsModel', () => {
         downloadDirName: 'Movies',
         downloadDirPath: '/Movies',
         skipManualPushDirectoryPicker: true,
+        autoCleanupAfter115Download: true,
         verifyCount: 3,
         maxFailures: 2,
         v2RefreshTokenStatus: 'valid',
@@ -115,6 +117,7 @@ describe('drive115SettingsModel', () => {
     expect(form.downloadDir).toBe('12345');
     expect(form.downloadDirName).toBe('Movies');
     expect(form.skipManualPushDirectoryPicker).toBe(true);
+    expect(form.autoCleanupAfter115Download).toBe(true);
     expect(form.verifyCount).toBe(3);
     expect(form.maxFailures).toBe(2);
     expect(form.v2RefreshTokenStatus).toBe('valid');
@@ -134,6 +137,7 @@ describe('drive115SettingsModel', () => {
       downloadDir: 'dl-cid',
       downloadDirName: 'Downloads',
       skipManualPushDirectoryPicker: true,
+      autoCleanupAfter115Download: true,
       mediaLibraryRoots: [
         { cid: 'lib-a', name: 'A', path: '/A', enabled: true },
         { cid: 'lib-b', enabled: false },
@@ -144,6 +148,7 @@ describe('drive115SettingsModel', () => {
     });
     expect(patch.downloadDir).toBe('dl-cid');
     expect(patch.skipManualPushDirectoryPicker).toBe(true);
+    expect(patch.autoCleanupAfter115Download).toBe(true);
     expect(patch.mediaLibraryRoots).toEqual([
       { cid: 'lib-a', name: 'A', path: '/A', enabled: true },
       { cid: 'lib-b', name: undefined, path: undefined, enabled: false },

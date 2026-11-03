@@ -52,7 +52,7 @@ export async function searchDrive115PlayCandidates(
 export function buildDrive115WebPlayUrl(candidate: Pick<Drive115PlayCandidate, 'pickCode'>): string | null {
   const pick = String(candidate.pickCode || '').trim();
   if (!pick) return null;
-  return `https://115.com/?ct=play&pickcode=${encodeURIComponent(pick)}`;
+  return `https://115vod.com/?pickcode=${encodeURIComponent(pick)}&share_id=0`;
 }
 
 /**

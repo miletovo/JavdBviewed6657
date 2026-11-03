@@ -16,6 +16,8 @@ import {
   lookupByCode,
   type Drive115LibraryIndexState,
 } from '../mediaLibrary';
+import { normalizeVideoCodeCandidate } from '../../../shared/utils/videoCodeExtractor';
+import { buildDrive115WebPlayUrl } from '../v2/drive115PlaybackActions';
 
 export function isDrive115LibraryStatusEnabled(settings: Record<string, unknown>): boolean {
   const libraryMatchStatus = settings.libraryMatchStatus as { enabled?: boolean; sources?: { drive115?: boolean } } | undefined;
@@ -28,9 +30,14 @@ export function isDrive115LibraryStatusEnabled(settings: Record<string, unknown>
     || listEnhancement?.drive115LibraryStatus?.enabled === true;
 }
 
+function normalizeBadgeCode(value: unknown): string {
+  const raw = String(value || '').trim();
+  return (normalizeVideoCodeCandidate(raw) || raw).toUpperCase();
+}
+
 export function matchesDrive115LibraryCode(code: string, matchedCodes: readonly string[]): boolean {
-  const target = String(code).trim().toUpperCase();
-  return Boolean(target) && matchedCodes.some((matchedCode) => String(matchedCode).trim().toUpperCase() === target);
+  const target = normalizeBadgeCode(code);
+  return Boolean(target) && matchedCodes.some((matchedCode) => normalizeBadgeCode(matchedCode) === target);
 }
 
 // ---------------------------------------------------------------------------
@@ -69,8 +76,84 @@ interface RenderedCardRecord {
 const renderedCards = new Map<HTMLElement, RenderedCardRecord>();
 let refreshInFlight: Promise<void> | null = null;
 
+function clearPlayControl(container: HTMLElement): void {
+  const card = container.closest<HTMLElement>('.item');
+  card?.querySelectorAll('.drive115-library-play-control').forEach((control) => control.remove());
+  card?.querySelectorAll('.drive115-library-play-host').forEach((host) => host.classList.remove('drive115-library-play-host'));
+}
+
 function clearBadge(container: HTMLElement): void {
   container.querySelectorAll('.drive115-library-status-tag').forEach((tag) => tag.remove());
+  clearPlayControl(container);
+}
+
+function openDrive115Entry(entry: Drive115LibraryIndexState['entries'][number]): void {
+  const url = buildDrive115WebPlayUrl(entry);
+  if (url) window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+function renderPlayControl(
+  container: HTMLElement,
+  entries: Drive115LibraryIndexState['entries'],
+): void {
+  const card = container.closest<HTMLElement>('.item');
+  const cover = card?.querySelector<HTMLElement>('.cover');
+  const host = cover?.closest<HTMLElement>('.box') || cover;
+  if (!host || !entries.length) return;
+
+  host.classList.add('drive115-library-play-host');
+  const candidates = [...entries].sort((a, b) => b.fileSize - a.fileSize);
+  const control = document.createElement('div');
+  control.className = 'drive115-library-play-control';
+
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'drive115-library-play-button';
+  trigger.textContent = candidates.length > 1 ? '▶ 115 · ' + candidates.length : '▶ 115';
+  trigger.title = candidates.length > 1
+    ? '115 本地有 ' + candidates.length + ' 个视频，点击选择播放'
+    : '115 本地已有：' + (candidates[0]?.fileName || candidates[0]?.code || '');
+  trigger.setAttribute('aria-label', trigger.title);
+  trigger.setAttribute('aria-expanded', 'false');
+  trigger.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (candidates.length === 1) {
+      openDrive115Entry(candidates[0]);
+      return;
+    }
+    const currentMenu = control.querySelector('.drive115-library-play-menu');
+    if (currentMenu) {
+      currentMenu.remove();
+      trigger.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    const menu = document.createElement('div');
+    menu.className = 'drive115-library-play-menu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', '选择 115 本地视频');
+    for (const candidate of candidates) {
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.className = 'drive115-library-play-option';
+      option.setAttribute('role', 'menuitem');
+      const size = candidate.fileSize > 0 ? ' · ' + Math.round(candidate.fileSize / 1024 / 1024) + ' MB' : '';
+      option.textContent = (candidate.fileName || candidate.code || '视频文件') + size;
+      option.title = candidate.fileName || candidate.code || '115 视频';
+      option.addEventListener('click', (optionEvent) => {
+        optionEvent.preventDefault();
+        optionEvent.stopPropagation();
+        menu.remove();
+        trigger.setAttribute('aria-expanded', 'false');
+        openDrive115Entry(candidate);
+      });
+      menu.appendChild(option);
+    }
+    control.appendChild(menu);
+    trigger.setAttribute('aria-expanded', 'true');
+  });
+  control.appendChild(trigger);
+  host.appendChild(control);
 }
 
 function renderBadgeInto(
@@ -88,8 +171,9 @@ function renderBadgeInto(
   const badge = document.createElement('span');
   badge.className = 'tag is-info is-light drive115-library-status-tag';
   badge.textContent = '115 已有';
-  badge.title = `115 媒体库已匹配 ${matches.length} 个文件`;
+  badge.title = '115 媒体库已匹配 ' + matches.length + ' 个视频文件';
   container.appendChild(badge);
+  renderPlayControl(container, matches);
 }
 
 /** 清理已从 DOM 移除的容器注册，避免注册表随翻页无限增长 */

@@ -548,6 +548,46 @@ describe('mediaLibraryIndexAdapter', () => {
     expect(hasDrive115LibraryIndex({ entries: items as any })).toBe(true);
   });
 
+  it('aggregates every same-code 115 video and fills missing cover/NFO metadata', () => {
+    const mapped = mapDrive115LibraryStateToBrowseItems({
+      entries: [
+        {
+          key: 'folder-a:video-a',
+          code: 'SSIS-001',
+          title: 'SSIS-001',
+          videoFileId: 'video-a',
+          pickCode: 'pick-a',
+          fileName: 'SSIS-001-CD1.mp4',
+          folderName: 'SSIS-001',
+        },
+        {
+          key: 'folder-b:video-b',
+          code: 'SSIS-001',
+          title: 'SSIS-001 高清版',
+          videoFileId: 'video-b',
+          pickCode: 'pick-b',
+          fileName: 'SSIS-001-CD2.mkv',
+          folderName: 'SSIS-001/高清版',
+          coverPickCode: 'cover-pick',
+          nfoSummary: { title: 'SSIS-001 真实标题', year: '2024' },
+        },
+      ],
+    });
+
+    const [merged] = mergeBrowseCatalogs([], mapped);
+    expect(merged).toBeDefined();
+    expect(merged.copies).toHaveLength(2);
+    expect(merged.copies?.map((copy) => copy.pickCode)).toEqual(['pick-a', 'pick-b']);
+    expect(merged.copies?.map((copy) => copy.fileName)).toEqual([
+      'SSIS-001-CD1.mp4',
+      'SSIS-001-CD2.mkv',
+    ]);
+    expect(merged.coverPickCode).toBe('cover-pick');
+    expect(merged.nfoSummary?.title).toBe('SSIS-001 真实标题');
+    expect(merged.year).toBe('2024');
+    expect(merged.title).toBe('SSIS-001 真实标题');
+  });
+
   it('prefers parsed NFO summary for 115 title and year', () => {
     const items = mapDrive115LibraryStateToBrowseItems({
       entries: [

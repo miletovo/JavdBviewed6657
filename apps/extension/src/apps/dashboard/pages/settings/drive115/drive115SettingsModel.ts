@@ -41,6 +41,8 @@ export type Drive115SettingsFormState = {
   downloadDirName: string;
   downloadDirPath: string;
   skipManualPushDirectoryPicker: boolean;
+  /** 仅清理本次任务新增的 torrent/pad/系统临时文件；默认关闭 */
+  autoCleanupAfter115Download: boolean;
   verifyCount: number;
   maxFailures: number;
   /** 媒体库片库根目录列表（多根） */
@@ -112,6 +114,7 @@ export const DEFAULT_DRIVE115_SETTINGS_FORM: Drive115SettingsFormState = {
   downloadDirName: '',
   downloadDirPath: '',
   skipManualPushDirectoryPicker: false,
+  autoCleanupAfter115Download: false,
   verifyCount: 5,
   maxFailures: 5,
   mediaLibraryRoots: [],
@@ -257,6 +260,7 @@ export function mapSettingsToDrive115Form(
     downloadDirName: String(raw.downloadDirName ?? ''),
     downloadDirPath: String(raw.downloadDirPath ?? ''),
     skipManualPushDirectoryPicker: raw.skipManualPushDirectoryPicker === true,
+    autoCleanupAfter115Download: raw.autoCleanupAfter115Download === true,
     verifyCount: Math.max(
       1,
       parseIntSafe(raw.verifyCount, DEFAULT_DRIVE115_SETTINGS_FORM.verifyCount),
@@ -317,6 +321,7 @@ export function formToDrive115Patch(
     downloadDirName: form.downloadDirName,
     downloadDirPath: form.downloadDirPath,
     skipManualPushDirectoryPicker: form.skipManualPushDirectoryPicker === true,
+    autoCleanupAfter115Download: form.autoCleanupAfter115Download === true,
     verifyCount: Math.max(1, Math.floor(form.verifyCount) || 1),
     maxFailures: Math.max(0, Math.floor(form.maxFailures) || 0),
     mediaLibraryRoots: normalizeMediaLibraryRoots(form.mediaLibraryRoots),

@@ -17,6 +17,7 @@ import {
 import { LazyRemoteImage } from '../../../../ui/patterns/LazyRemoteImage/LazyRemoteImage';
 import { sendRuntimeMessage } from '../../../../platform/browser/runtimeMessages';
 import { NFO_SUMMARY_SCHEMA_VERSION } from '../../../../features/drive115/mediaLibrary/parseEntryMeta';
+import { buildDrive115WebPlayUrl } from '../../../../features/drive115/v2/drive115PlaybackActions';
 import { resolveDrive115CoverUrl } from './drive115CoverCache';
 import type { MediaBrowseItem, MediaSourceCopy } from './mediaBrowseModel';
 import {
@@ -118,6 +119,9 @@ export const MediaItemDetailPanel = memo(function MediaItemDetailPanel({
   const detailServerId = preferredDetailCopy?.serverId ?? item.serverId;
   const detailServerName = preferredDetailCopy?.serverName ?? item.serverName;
   const is115Detail = detailSource === '115';
+  const drive115WebPlayUrl = is115Detail && item.pickCode
+    ? buildDrive115WebPlayUrl({ pickCode: item.pickCode })
+    : null;
   const resolvedDetailServerUrl = detail?.serverUrl || detailServerUrl;
   const resolvedDetailServerId = detail?.serverId || detailServerId;
   const serverOpenUrl = buildServerOpenUrl({
@@ -535,6 +539,17 @@ export const MediaItemDetailPanel = memo(function MediaItemDetailPanel({
                 ) : null}
               </div>
             ) : null}
+            {drive115WebPlayUrl ? (
+              <a
+                className="ml-detail-btn ml-detail-btn-secondary"
+                href={drive115WebPlayUrl}
+                target="_blank"
+                rel="noreferrer"
+                title="在 115vod 中打开本地视频"
+              >
+                ↗ 115 网页播放
+              </a>
+            ) : null}
             {detailItemId && detailServerUrl ? (
               <button
                 type="button"
@@ -637,7 +652,9 @@ export const MediaItemDetailPanel = memo(function MediaItemDetailPanel({
                 const copyProgress = formatWatchPercent(copy.userData);
                 const playbackStatus = getMediaSourceCopyPlaybackStatus(copy);
                 const copyLabel = formatMediaSourceCopyLabel(copy);
-                const copyOpenUrl = buildServerOpenUrl(copy);
+                const copyOpenUrl = copy.source === '115'
+                  ? (copy.pickCode ? buildDrive115WebPlayUrl({ pickCode: copy.pickCode }) : null)
+                  : buildServerOpenUrl(copy);
                 return (
                   <div key={copy.copyId} className="ml-detail-copy-row">
                     <span className="ml-detail-copy-source">{sourceLabel(copy.source)}</span>
@@ -659,9 +676,9 @@ export const MediaItemDetailPanel = memo(function MediaItemDetailPanel({
                         href={copyOpenUrl}
                         target="_blank"
                         rel="noreferrer"
-                        title={`在 ${copyLabel} 中打开此影片`}
+                        title={copy.source === '115' ? '在 115vod 中打开此视频' : `在 ${copyLabel} 中打开此影片`}
                       >
-                        ↗ 打开网页
+                        {copy.source === '115' ? '↗ 115 网页播放' : '↗ 打开网页'}
                       </a>
                     ) : null}
                     <button

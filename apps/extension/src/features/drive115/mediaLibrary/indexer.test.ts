@@ -57,6 +57,59 @@ describe('indexDrive115Roots', () => {
     expect(listFiles).toHaveBeenCalled();
   });
 
+
+  it('indexes every playable video in a folder and keeps shared cover metadata', async () => {
+    const result = await indexDrive115Roots({
+      roots: [{ cid: 'root', enabled: true }],
+      listFiles: async ({ cid }) => {
+        if (cid === 'root') {
+          return { success: true, data: [{ fc: '0', cid: 'movie', fn: 'SSIS-001' }] };
+        }
+        return {
+          success: true,
+          data: [
+            { fc: '1', fid: 'video-a', fn: 'SSIS-001.mp4', fs: 900, pc: 'pick-a' },
+            { fc: '1', fid: 'video-b', fn: 'SSIS-001.mkv', fs: 700, pc: 'pick-b' },
+            { fc: '1', fid: 'poster', fn: 'poster.jpg', fs: 10, pc: 'cover-pick' },
+          ],
+        };
+      },
+      sleep: async () => {},
+      rootIntervalMs: 0,
+      folderIntervalMs: 0,
+      now: () => 1_700_000_000_000,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.state.entries).toHaveLength(2);
+    expect(result.state.entries.map((entry) => entry.videoFileId).sort()).toEqual(['video-a', 'video-b']);
+    expect(result.state.entries.map((entry) => entry.pickCode).sort()).toEqual(['pick-a', 'pick-b']);
+    expect(result.state.entries.every((entry) => entry.code === 'SSIS-001')).toBe(true);
+    expect(result.state.entries.every((entry) => entry.coverPickCode === 'cover-pick')).toBe(true);
+    expect(result.state.stats.foldersSeen).toBe(1);
+    expect(result.state.stats.indexed).toBe(2);
+  });
+
+  it('uses each video filename code before a code-like parent folder name', async () => {
+    const result = await indexDrive115Roots({
+      roots: [{ cid: 'root', enabled: true }],
+      listFiles: async ({ cid }) => {
+        if (cid === 'root') {
+          return { success: true, data: [{ fc: '0', cid: 'movie', fn: 'SSIS-001' }] };
+        }
+        return {
+          success: true,
+          data: [{ fc: '1', fid: 'video', fn: 'OTHER-002.mp4', fs: 10, pc: 'video-pick' }],
+        };
+      },
+      sleep: async () => {},
+      rootIntervalMs: 0,
+      folderIntervalMs: 0,
+    });
+
+    expect(result.state.entries[0]?.code).toBe('OTHER-002');
+  });
+
   it('persists cover and nfo pick codes from alternate 115 list fields', async () => {
     const listFiles = vi.fn(async ({ cid }: { cid: string }) => {
       if (cid === 'root') {

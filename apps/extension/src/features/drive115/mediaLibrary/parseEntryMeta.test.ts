@@ -18,14 +18,14 @@ describe('parseEntryMeta', () => {
     expect(parseCodeFromName('FC2-PPV-1234567')).toBe('FC2-PPV-1234567');
   });
 
-  it('resolves code by priority folder > video > nfo', () => {
+  it('resolves code by priority video > folder > nfo', () => {
     expect(
       resolveEntryCode({
         folderName: 'SSIS-001 标题',
         videoFileName: 'OTHER-002.mp4',
         nfoFileName: 'OTHER-003.nfo',
       }),
-    ).toEqual({ code: 'SSIS-001', source: 'folder' });
+    ).toEqual({ code: 'OTHER-002', source: 'video' });
 
     expect(
       resolveEntryCode({
@@ -33,6 +33,14 @@ describe('parseEntryMeta', () => {
         videoFileName: 'ABC-123.mp4',
       }),
     ).toEqual({ code: 'ABC-123', source: 'video' });
+
+    expect(
+      resolveEntryCode({
+        folderName: 'SSIS-001 标题',
+        videoFileName: 'video.mp4',
+        nfoFileName: 'OTHER-003.nfo',
+      }),
+    ).toEqual({ code: 'SSIS-001', source: 'folder' });
 
     expect(
       resolveEntryCode({

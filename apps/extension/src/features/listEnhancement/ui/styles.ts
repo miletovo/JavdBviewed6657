@@ -184,6 +184,80 @@ export const LIST_ENHANCEMENT_BASE_STYLES = `
       overflow: hidden;
     }
 
+    .drive115-library-play-host {
+      position: relative !important;
+      overflow: visible !important;
+    }
+
+    .drive115-library-play-control {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      z-index: 60;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 6px;
+      max-width: min(230px, 75%);
+    }
+
+    .drive115-library-play-button {
+      border: 1px solid rgba(255,255,255,0.28);
+      border-radius: 999px;
+      padding: 6px 10px;
+      background: rgba(20, 24, 32, 0.88);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.25;
+      white-space: nowrap;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.32);
+      backdrop-filter: blur(6px);
+    }
+
+    .drive115-library-play-button:hover,
+    .drive115-library-play-button:focus-visible {
+      background: #1677d2;
+      outline: 2px solid rgba(255,255,255,0.8);
+      outline-offset: 1px;
+    }
+
+    .drive115-library-play-menu {
+      display: flex;
+      flex-direction: column;
+      width: max-content;
+      max-width: min(230px, 75vw);
+      max-height: 180px;
+      overflow: auto;
+      padding: 4px;
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 8px;
+      background: rgba(20, 24, 32, 0.96);
+      box-shadow: 0 6px 20px rgba(0,0,0,0.38);
+    }
+
+    .drive115-library-play-option {
+      display: block;
+      width: 100%;
+      border: 0;
+      border-radius: 5px;
+      padding: 7px 9px;
+      background: transparent;
+      color: #fff;
+      font-size: 11px;
+      line-height: 1.35;
+      text-align: left;
+      overflow-wrap: anywhere;
+      cursor: pointer;
+    }
+
+    .drive115-library-play-option:hover,
+    .drive115-library-play-option:focus-visible {
+      background: rgba(22,119,210,0.85);
+      outline: none;
+    }
+
     .x-preview {
       position: relative;
       display: block;

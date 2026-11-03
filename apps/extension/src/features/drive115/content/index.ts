@@ -4,7 +4,7 @@
 
 import { isDrive115Enabled, addTaskUrlsV2, downloadOffline as routerDownloadOffline } from '../router';
 import { addLogV2 } from '../v2/logs';
-// getDrive115V2Service 已移除，配额功能已迁移至dashboard
+import { getDrive115V2Service } from '../v2';
 import { waitForElement } from '../../../platform/browser/domUtils';
 // extractVideoIdFromPage 已集成到推送按钮逻辑中
 import { showToast } from '../../../platform/browser/toast';
@@ -20,6 +20,12 @@ import {
 } from '../ui/manualPushDirectory';
 import { completeManagedTask, createManagedTaskDescriptor, ensureManagedTaskRegistered, failManagedTask, progressManagedTask, requestTaskLease, runChunkedWork, saveSubtaskDetail, waitForTaskLease, yieldToMainThread } from '../../../platform/tasks';
 import { getPageContext } from '../../../platform/browser';
+import {
+    buildDrive115OrganizedVideoNames,
+    findDrive115OfflineTask,
+    isDrive115TaskJunkFileName,
+    isDrive115VideoFileName,
+} from '../offlineOrganizerModel';
 
 type Drive115PushSettingsCache = {
     enabled: boolean;
@@ -30,6 +36,7 @@ type Drive115PushSettingsCache = {
     skipManualPushDirectoryPicker: boolean;
     autoMarkWatchedAfter115: boolean;
     autoMarkWatchedStars: number;
+    autoCleanupAfter115Download: boolean;
 };
 
 let drive115PushSettingsCache: Drive115PushSettingsCache | null = null;
@@ -49,6 +56,7 @@ async function refreshDrive115PushSettingsCache(): Promise<Drive115PushSettingsC
         skipManualPushDirectoryPicker: (settings as any)?.drive115?.skipManualPushDirectoryPicker === true,
         autoMarkWatchedAfter115: (settings as any)?.videoEnhancement?.autoMarkWatchedAfter115 !== false,
         autoMarkWatchedStars: (settings as any)?.videoEnhancement?.autoMarkWatchedStars ?? 4,
+        autoCleanupAfter115Download: (settings as any)?.drive115?.autoCleanupAfter115Download === true,
     };
 
     drive115PushSettingsCache = cache;
@@ -110,9 +118,455 @@ async function fetchWithTimeoutRetry(
 }
 
 
+type Drive115FileSnapshot = {
+    fileIds: Set<string>;
+    folderIds: Set<string>;
+    rootFileNames: Set<string>;
+};
+
+type Drive115ListedFile = {
+    id: string;
+    name: string;
+    parentId: string;
+    isFolder: boolean;
+};
+
+function getDrive115ItemId(item: Record<string, any>): string {
+    return String(item.file_id ?? item.fid ?? item.cid ?? '').trim();
+}
+
+function getDrive115ItemName(item: Record<string, any>): string {
+    return String(item.file_name ?? item.fn ?? item.name ?? '').trim();
+}
+
+function isDrive115Folder(item: Record<string, any>): boolean {
+    return String(item.fc ?? item.file_category ?? '') === '0'
+        || item.is_dir === true
+        || item.is_directory === true;
+}
+
+/** 读取完整目录分页，避免超过 1150 项时漏掉旧文件快照或新下载文件。 */
+async function listAllDrive115FolderItems(
+    svc: ReturnType<typeof getDrive115V2Service>,
+    accessToken: string,
+    folderId: string,
+): Promise<Array<Record<string, any>>> {
+    const all: Array<Record<string, any>> = [];
+    const limit = 1150;
+    let offset = 0;
+    for (let page = 0; page < 100; page += 1) {
+        const listed = await svc.listFiles({
+            accessToken,
+            cid: folderId,
+            limit,
+            offset,
+            show_dir: 1,
+            stdir: 1,
+            cur: 1,
+        });
+        if (!listed.success) throw new Error(listed.message || '读取 115 目录失败');
+        const data = Array.isArray(listed.data) ? listed.data as Array<Record<string, any>> : [];
+        if (!data.length) break;
+        all.push(...data);
+        offset += data.length;
+        const count = Number(listed.count || 0);
+        if (data.length < limit || (count > 0 && offset >= count)) break;
+    }
+    return all;
+}
+
+/** 递归遍历目录树；快照和完成后扫描使用同一深度，保证文件 ID 比较可靠。 */
+async function walkDrive115Folder(
+    svc: ReturnType<typeof getDrive115V2Service>,
+    accessToken: string,
+    rootFolderId: string,
+    visitor: (entry: Drive115ListedFile, depth: number) => void,
+    maxDepth = 3,
+): Promise<void> {
+    const visited = new Set<string>();
+    const visit = async (folderId: string, depth: number): Promise<void> => {
+        if (visited.has(folderId)) return;
+        visited.add(folderId);
+        const items = await listAllDrive115FolderItems(svc, accessToken, folderId);
+        for (const item of items) {
+            const id = getDrive115ItemId(item);
+            if (!id) continue;
+            const entry: Drive115ListedFile = {
+                id,
+                name: getDrive115ItemName(item),
+                parentId: folderId,
+                isFolder: isDrive115Folder(item),
+            };
+            visitor(entry, depth);
+            if (entry.isFolder && depth < maxDepth) {
+                await visit(id, depth + 1);
+            }
+        }
+    };
+    await visit(rootFolderId, 0);
+}
+
+async function snapshotDrive115Folder(folderId: string): Promise<Drive115FileSnapshot> {
+    const svc = getDrive115V2Service();
+    const token = await svc.getValidAccessToken({ forceAutoRefresh: true });
+    if (!token.success || !token.accessToken) throw new Error(token.message || '无法获取 115 授权');
+    const fileIds = new Set<string>();
+    const folderIds = new Set<string>();
+    const rootFileNames = new Set<string>();
+    await walkDrive115Folder(svc, token.accessToken, folderId, (entry, depth) => {
+        if (entry.isFolder) {
+            folderIds.add(entry.id);
+            return;
+        }
+        fileIds.add(entry.id);
+        if (depth === 0 && entry.name) rootFileNames.add(entry.name);
+    });
+    return { fileIds, folderIds, rootFileNames };
+}
+
+async function monitorAndOrganizeDrive115Download(params: {
+    videoId: string;
+    folderId: string;
+    taskHash?: string;
+    magnetName: string;
+    button: HTMLButtonElement;
+    before: Drive115FileSnapshot;
+    autoMarkWatched?: boolean;
+    autoMarkWatchedStars?: number;
+    autoCleanupAfter115Download?: boolean;
+    coverUrl?: string;
+    previewUrls?: string[];
+}): Promise<void> {
+    const svc = getDrive115V2Service();
+    const deadline = Date.now() + 24 * 60 * 60 * 1000;
+    let completed = false;
+    let failed = false;
+    let lastPollError = '';
+
+    // 离线任务可能持续数小时；每轮重新获取有效 token，避免长时间等待后令牌过期。
+    while (Date.now() < deadline) {
+        await delay(30000);
+        const token = await svc.getValidAccessToken({ forceAutoRefresh: true });
+        if (!token.success || !token.accessToken) {
+            lastPollError = token.message || '115 授权暂不可用';
+            continue;
+        }
+        const taskList = await svc.getTaskList({ accessToken: token.accessToken, page: 1 });
+        if (!taskList.success) {
+            lastPollError = taskList.message || '读取 115 离线任务失败';
+            continue;
+        }
+        const task = findDrive115OfflineTask(taskList.data?.tasks || [], {
+            taskHash: params.taskHash,
+            folderId: params.folderId,
+            videoId: params.videoId,
+            magnetName: params.magnetName,
+        });
+        if (!task) continue;
+        const status = Number(task.status);
+        if (status === -1) {
+            failed = true;
+            break;
+        }
+        if (status === 2) {
+            completed = true;
+            break;
+        }
+    }
+
+    if (!completed) {
+        showToast(
+            failed
+                ? params.videoId + ' 的 115 离线任务失败，请检查 115 任务列表'
+                : params.videoId + ' 已提交到 115，仍在下载或等待中；' + (lastPollError ? '最近一次监控提示：' + lastPollError : '整理监控超过 24 小时已停止'),
+            failed ? 'error' : 'info',
+        );
+        return;
+    }
+
+    // 先完整扫描再执行任何移动/重命名/删除，扫描失败时不碰云端现有文件。
+    const collected: Drive115ListedFile[] = [];
+    const token = await svc.getValidAccessToken({ forceAutoRefresh: true });
+    if (!token.success || !token.accessToken) {
+        showToast(params.videoId + ' 下载完成，但无法取得授权进行文件整理', 'error');
+        return;
+    }
+    await walkDrive115Folder(svc, token.accessToken, params.folderId, (entry) => {
+        if (!entry.isFolder && !params.before.fileIds.has(entry.id)) collected.push(entry);
+    });
+
+    const videos = collected.filter((file) => isDrive115VideoFileName(file.name));
+    if (!videos.length) {
+        showToast(params.videoId + ' 的离线任务已完成，但没有发现本次新增的视频文件', 'info');
+        return;
+    }
+
+    const arranged = buildDrive115OrganizedVideoNames(
+        params.videoId,
+        videos,
+        [...params.before.rootFileNames],
+    );
+    let moved = 0;
+    let renamed = 0;
+    let failedOperations = 0;
+    for (const file of arranged) {
+        if (file.parentId !== params.folderId) {
+            const move = await svc.moveFiles({
+                accessToken: token.accessToken,
+                fileIds: [file.id],
+                targetFolderId: params.folderId,
+            });
+            if (move.success) moved += 1;
+            else failedOperations += 1;
+        }
+        if (file.name !== file.nextName) {
+            const rename = await svc.renameFile({
+                accessToken: token.accessToken,
+                fileId: file.id,
+                fileName: file.nextName,
+            });
+            if (rename.success) renamed += 1;
+            else failedOperations += 1;
+        }
+    }
+
+    // 仅清理「本次新增」且扩展名明确属于种子/系统杂项的文件。
+    // NFO、字幕、图片、TXT 说明及未知格式均保留，不对旧文件执行删除。
+    const junkFiles = params.autoCleanupAfter115Download === true
+        ? collected.filter((file) => (
+            !isDrive115VideoFileName(file.name) && isDrive115TaskJunkFileName(file.name)
+        ))
+        : [];
+    let deleted = 0;
+    for (let index = 0; index < junkFiles.length; index += 50) {
+        const batch = junkFiles.slice(index, index + 50);
+        const remove = await svc.deleteFiles({
+            accessToken: token.accessToken,
+            fileIds: batch.map((file) => file.id),
+        });
+        if (remove.success) deleted += batch.length;
+        else failedOperations += batch.length;
+    }
+
+    const imageResult = await uploadJavDbMediaAssetsTo115({
+        svc,
+        accessToken: token.accessToken,
+        folderId: params.folderId,
+        coverUrl: params.coverUrl,
+        previewUrls: params.previewUrls,
+    });
+    failedOperations += imageResult.failed;
+    if (params.button.isConnected) {
+        params.button.innerHTML = failedOperations ? '整理部分完成' : '整理完成';
+        params.button.className = 'button is-success is-small drive115-push-btn';
+    }
+    showToast(
+        params.videoId + ' 下载完成：视频 ' + videos.length + ' 个，图片 ' + imageResult.uploaded
+        + ' 张，移动 ' + moved + '，重命名 ' + renamed + '，清理杂项 ' + deleted
+        + (failedOperations ? '；另有 ' + failedOperations + ' 项操作未成功' : ''),
+        failedOperations ? 'info' : 'success',
+    );
+    if (params.autoMarkWatched) {
+        try {
+            await markVideoAsWatched(params.videoId, params.autoMarkWatchedStars || 4);
+        } catch (error) {
+            showToast('影片已整理，但自动标记已看失败：' + (error instanceof Error ? error.message : String(error)), 'info');
+        }
+    }
+}
+
+
+type JavDbMediaAssets = { coverUrl?: string; previewUrls: string[] };
+
+function resolveJavDbImageUrl(element: HTMLImageElement | HTMLAnchorElement | null): string | undefined {
+    if (!element) return undefined;
+    const raw = element instanceof HTMLAnchorElement
+        ? (element.getAttribute('href') || element.href)
+        : (element.getAttribute('data-src')
+            || element.getAttribute('data-original')
+            || element.getAttribute('data-lazy')
+            || element.currentSrc
+            || element.src);
+    if (!raw || /^data:/i.test(raw)) return undefined;
+    try {
+        const url = new URL(raw, window.location.href);
+        if (url.protocol !== 'https:' && url.protocol !== 'http:') return undefined;
+        return url.href;
+    } catch {
+        return undefined;
+    }
+}
+
+function collectJavDbMediaAssets(): JavDbMediaAssets {
+    const coverImage = document.querySelector<HTMLImageElement>('.column-video-cover img.video-cover');
+    const coverAnchor = coverImage?.closest<HTMLAnchorElement>('a[href]')
+        || document.querySelector<HTMLAnchorElement>('.column-video-cover a[data-fancybox="gallery"]');
+    const coverUrl = resolveJavDbImageUrl(coverAnchor) || resolveJavDbImageUrl(coverImage);
+
+    const previewUrls: string[] = [];
+    const seen = new Set<string>(coverUrl ? [coverUrl] : []);
+    const selectors = [
+        '#video-images img',
+        '.video-images img',
+        '.preview-images img',
+        '.video-preview-images img',
+        '.sample-images img',
+        '.video-samples img',
+        '.preview-list img',
+        '.tile-images img',
+        'a[data-fancybox="gallery"]',
+    ];
+    for (const selector of selectors) {
+        const elements = Array.from(document.querySelectorAll<HTMLImageElement | HTMLAnchorElement>(selector));
+        for (const element of elements) {
+            if (element.closest('.column-video-cover')) continue;
+            const url = resolveJavDbImageUrl(element);
+            if (!url || seen.has(url)) continue;
+            seen.add(url);
+            previewUrls.push(url);
+            if (previewUrls.length >= 8) return { coverUrl, previewUrls };
+        }
+    }
+    return { coverUrl, previewUrls };
+}
+
+function getJavDbImageExtension(sourceUrl: string): string {
+    try {
+        const ext = new URL(sourceUrl).pathname.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+        if (ext === 'jpeg') return 'jpg';
+        if (ext && ['jpg', 'png', 'webp', 'gif'].includes(ext)) return ext;
+    } catch {}
+    return 'jpg';
+}
+
+async function uploadJavDbMediaAssetsTo115(params: {
+    svc: ReturnType<typeof getDrive115V2Service>;
+    accessToken: string;
+    folderId: string;
+    coverUrl?: string;
+    previewUrls?: string[];
+}): Promise<{ uploaded: number; failed: number }> {
+    const assets: Array<{ sourceUrl: string; fileName: string }> = [];
+    if (params.coverUrl) {
+        assets.push({ sourceUrl: params.coverUrl, fileName: 'cover.' + getJavDbImageExtension(params.coverUrl) });
+    }
+    (params.previewUrls || []).slice(0, 8).forEach((sourceUrl, index) => {
+        assets.push({
+            sourceUrl,
+            fileName: 'preview-' + String(index + 1).padStart(2, '0') + '.' + getJavDbImageExtension(sourceUrl),
+        });
+    });
+    let uploaded = 0;
+    let failed = 0;
+    for (const asset of assets) {
+        const result = await params.svc.uploadRemoteImage({
+            accessToken: params.accessToken,
+            parentId: params.folderId,
+            fileName: asset.fileName,
+            sourceUrl: asset.sourceUrl,
+        });
+        if (result.success) uploaded += 1;
+        else failed += 1;
+    }
+    return { uploaded, failed };
+}
+
+async function scheduleDrive115OfflineOrganizer(params: {
+    videoId: string;
+    folderId: string;
+    taskHash?: string;
+    magnetName: string;
+    before: Drive115FileSnapshot;
+    coverUrl?: string;
+    previewUrls?: string[];
+    autoMarkWatched?: boolean;
+    autoMarkWatchedStars?: number;
+    autoCleanupAfter115Download?: boolean;
+}): Promise<{ success: boolean; message?: string }> {
+    if (typeof chrome === 'undefined' || !chrome.runtime?.id || typeof chrome.runtime.sendMessage !== 'function') {
+        return { success: false, message: '后台整理服务不可用' };
+    }
+    return new Promise((resolve) => {
+        try {
+            chrome.runtime.sendMessage({
+                type: 'drive115.offline-organizer.schedule',
+                payload: {
+                    videoId: params.videoId,
+                    folderId: params.folderId,
+                    taskHash: params.taskHash,
+                    magnetName: params.magnetName,
+                    beforeFileIds: [...params.before.fileIds],
+                    beforeRootFileNames: [...params.before.rootFileNames],
+                    coverUrl: params.coverUrl,
+                    previewUrls: params.previewUrls || [],
+                    autoMarkWatched: params.autoMarkWatched,
+                    autoMarkWatchedStars: params.autoMarkWatchedStars,
+                    autoCleanupAfter115Download: params.autoCleanupAfter115Download === true,
+                },
+            }, (response) => {
+                const error = chrome.runtime?.lastError;
+                if (error) {
+                    resolve({ success: false, message: error.message || '后台整理服务无响应' });
+                    return;
+                }
+                resolve(response && response.success
+                    ? { success: true }
+                    : { success: false, message: response?.message || '后台整理任务注册失败' });
+            });
+        } catch (error) {
+            resolve({ success: false, message: error instanceof Error ? error.message : String(error) });
+        }
+    });
+}
+
+let offlineOrganizerCompletionListenerAttached = false;
+
+function attachDrive115OfflineOrganizerCompletionListener(): void {
+    if (offlineOrganizerCompletionListenerAttached) return;
+    if (typeof chrome === 'undefined' || !chrome.runtime?.onMessage) return;
+    offlineOrganizerCompletionListenerAttached = true;
+    chrome.runtime.onMessage.addListener((message) => {
+        if (message?.type !== 'drive115.offline-organizer.completed') return false;
+        const payload = message.payload || {};
+        const videoId = String(payload.videoId || '').trim();
+        const status = String(payload.status || '');
+        const button = Array.from(document.querySelectorAll<HTMLButtonElement>('.drive115-push-btn'))
+            .find((candidate) => candidate.dataset.drive115VideoId === videoId);
+        if (button) {
+            button.disabled = false;
+            button.innerHTML = status === 'completed' ? '整理完成'
+                : status === 'partial' ? '整理部分完成' : '下载失败';
+            button.className = status === 'failed'
+                ? 'button is-danger is-small drive115-push-btn'
+                : 'button is-success is-small drive115-push-btn';
+        }
+        const result = payload.result || {};
+        if (status === 'completed' || status === 'partial') {
+            showToast(
+                videoId + ' 下载完成：视频 ' + (Number(result.videoCount) || 0)
+                + ' 个，图片 ' + (Number(result.imagesUploaded) || 0)
+                + ' 张，移动 ' + (Number(result.moved) || 0)
+                + '，重命名 ' + (Number(result.renamed) || 0)
+                + '，清理杂项 ' + (Number(result.deleted) || 0)
+                + (status === 'partial' ? '；部分操作未成功，请检查 115 文件夹' : ''),
+                status === 'partial' ? 'info' : 'success',
+            );
+            if (payload.autoMarkWatched) {
+                void markVideoAsWatched(videoId, Number(payload.autoMarkWatchedStars) || 4).catch((error) => {
+                    showToast('影片已整理，但自动标记已看失败：' + (error instanceof Error ? error.message : String(error)), 'info');
+                });
+            }
+        } else {
+            showToast(videoId + ' 的 115 自动整理失败：' + String(payload.message || '请检查 115 任务列表'), 'error');
+        }
+        return false;
+    });
+}
+
 async function inject115ButtonsIntoNativeMagnetList(): Promise<void> {
     const container = await waitForElement('#magnets-content', 1500, 120);
     if (!container) return;
+    attachDrive115OfflineOrganizerCompletionListener();
     const videoId = extractVideoIdFromPage() || 'unknown';
 
     const items = Array.from(container.querySelectorAll('.item')) as HTMLElement[];
@@ -295,6 +749,7 @@ export async function handlePushToDrive115(
         return rootTask;
     };
     const originalText = button.innerHTML;
+    button.dataset.drive115VideoId = videoId;
     log(`[Drive115] handlePushToDrive115 start: ${videoId} | ${magnetName} | ${pageContext.pageInstanceId}`);
     const stageStartTimes = new Map<string, number>();
     const beginStage = async (stage: string, detail: string, progressPct: number) => {
@@ -485,10 +940,26 @@ export async function handlePushToDrive115(
         try {
             await beginStage('prepare', `videoId=${videoId}`, 5);
             await addLogV2({ timestamp: Date.now(), level: 'info', message: `内容脚本：发起 115 推送，videoId=${videoId}，name=${magnetName}，magnet=${magnetUrl}，page=${window.location.href}` });
-            const wpPathId = directorySelection.cid;
+            const parentWpPathId = String(directorySelection.cid || cachedSettings.downloadDir || '0').trim() || '0';
+            const drive115Service = getDrive115V2Service();
+            const auth = await drive115Service.getValidAccessToken({ forceAutoRefresh: true });
+            if (!auth.success || !auth.accessToken) {
+                throw new Error(auth.message || '无法获取 115 授权');
+            }
+            const ensuredFolder = await drive115Service.ensureFolder({
+                accessToken: auth.accessToken,
+                parentId: parentWpPathId,
+                folderName: videoId,
+            });
+            if (!ensuredFolder.success || !ensuredFolder.folderId) {
+                throw new Error(ensuredFolder.message || '创建番号文件夹失败，未提交磁力任务');
+            }
+            const wpPathId = ensuredFolder.folderId;
+            const beforeFolderSnapshot = await snapshotDrive115Folder(wpPathId);
+            const pageMediaAssets = collectJavDbMediaAssets();
 
-            endStage('prepare', 'done', 'request prepared');
-            await beginStage('push-api', `wpPathId=${wpPathId ?? 'root'}`, 40);
+            endStage('prepare', 'done', 'number folder ready: ' + wpPathId);
+            await beginStage('push-api', `wpPathId=${wpPathId}`, 40);
             const task = getRootTask();
             console.info('[115Trace] content:addTaskUrls:start', {
                 traceId,
@@ -511,7 +982,45 @@ export async function handlePushToDrive115(
             });
             result = { success: res.success, data: res.data, error: res.message };
             if (res.success) {
-                endStage('push-api', 'done', `returned=${Array.isArray(res.data) ? res.data.length : 0}`);
+                const taskHash = Array.isArray(res.data)
+                    ? String(res.data.find((entry: any) => entry?.info_hash)?.info_hash || '')
+                    : '';
+                const organizerJob = await scheduleDrive115OfflineOrganizer({
+                    videoId,
+                    folderId: wpPathId,
+                    taskHash: taskHash || undefined,
+                    magnetName,
+                    before: beforeFolderSnapshot,
+                    coverUrl: pageMediaAssets.coverUrl,
+                    previewUrls: pageMediaAssets.previewUrls,
+                    autoMarkWatched: cachedSettings.autoMarkWatchedAfter115,
+                    autoMarkWatchedStars: cachedSettings.autoMarkWatchedStars,
+                    autoCleanupAfter115Download: cachedSettings.autoCleanupAfter115Download,
+                });
+                if (organizerJob.success) {
+                    button.innerHTML = '后台整理中';
+                    button.className = 'button is-info is-small drive115-push-btn';
+                    showToast(videoId + ' 已提交到 115，后台将自动监控下载、整理文件并保存封面/预览图', 'info');
+                } else {
+                    // 后台服务未能接管时，保留当前页面监控作为兼容兜底。
+                    showToast('后台整理服务未能启动，将由当前页面继续监控：' + (organizerJob.message || '未知原因'), 'info');
+                    void monitorAndOrganizeDrive115Download({
+                        videoId,
+                        folderId: wpPathId,
+                        taskHash: taskHash || undefined,
+                        magnetName,
+                        button,
+                        before: beforeFolderSnapshot,
+                        autoMarkWatched: cachedSettings.autoMarkWatchedAfter115,
+                        autoMarkWatchedStars: cachedSettings.autoMarkWatchedStars,
+                        autoCleanupAfter115Download: cachedSettings.autoCleanupAfter115Download,
+                        coverUrl: pageMediaAssets.coverUrl,
+                        previewUrls: pageMediaAssets.previewUrls,
+                    }).catch((error) => {
+                        log('[Drive115] Auto-organize monitor failed:', error);
+                    });
+                }
+                endStage('push-api', 'done', `returned=${Array.isArray(res.data) ? res.data.length : 0}; folder=${wpPathId}`);
                 const returned = Array.isArray(res.data) ? res.data.length : 0;
                 await addLogV2({ timestamp: Date.now(), level: 'info', message: `内容脚本：推送成功，返回 ${returned} 项，videoId=${videoId}` });
                 const task = getRootTask();
@@ -534,43 +1043,7 @@ export async function handlePushToDrive115(
 
 
 
-            // 推送成功后自动标记为已看（受设置控制）
-            try {
-                const autoMark = cachedSettings.autoMarkWatchedAfter115;
-                const stars = cachedSettings.autoMarkWatchedStars;
-                if (autoMark) {
-                    await beginStage('mark-watched', `stars=${stars}`, 80);
-                    log('开始标记视频为已看...');
-                    console.log('[JavDB Ext] 开始标记视频为已看...');
-                    const task = getRootTask();
-                    await progressManagedTask(task.taskId, { stage: 'mark-watched', detail: `stars=${stars}`, progressPct: 85 });
-                    await markVideoAsWatched(videoId, stars);
-                    endStage('mark-watched', 'done', `stars=${stars}`);
-                    log('markVideoAsWatched函数执行完毕');
-                    console.log('[JavDB Ext] markVideoAsWatched函数执行完毕');
-
-                    // 由于markVideoAsWatched内部会刷新页面，不需要恢复按钮状态
-                    await progressManagedTask(task.taskId, { stage: 'done', detail: 'push + mark complete', progressPct: 100 });
-                    await completeManagedTask(task.taskId);
-                    return;
-                }
-            } catch (error) {
-                endStage('mark-watched', 'error', error instanceof Error ? error.message : String(error), error instanceof Error ? error.message : String(error));
-                console.warn('自动标记已看失败或被关闭:', error);
-                console.error('[JavDB Ext] 自动标记已看失败或被关闭:', error);
-                try {
-                    const errMsg = error instanceof Error ? error.message : String(error);
-                    showToast(`已推送到115。自动标记已看：${errMsg || '已关闭'}`, 'info');
-                } catch {}
-
-                // 关闭或失败时，仍然恢复按钮状态
-                setTimeout(() => {
-                    button.innerHTML = originalText;
-                    button.disabled = false;
-                    button.className = 'button is-success is-small drive115-push-btn';
-                    button.dataset.drive115Force = '1';
-                }, 3000);
-            }
+            // 自动标记已看已延后到离线任务完成并整理成功后执行，避免提前刷新页面中断后台整理。
             const task = getRootTask();
             await progressManagedTask(task.taskId, { stage: 'done', detail: 'push complete', progressPct: 100 });
             await completeManagedTask(task.taskId);

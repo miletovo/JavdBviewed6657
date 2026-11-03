@@ -46,6 +46,8 @@ export interface Drive115OfflineOptionsUnified {
   magnetUrl: string;                                  // 磁力链接
   downloadDir?: string;                               // 下载目录（覆盖默认）
   autoVerify?: boolean;                               // 下载后自动验证文件
+  autoOrganize?: boolean;                             // 按番号创建文件夹并整理已完成的视频文件
+  folderName?: string;                                // 自动整理时使用的文件夹名称，默认番号
 }
 
 /** 批量任务条目 */
